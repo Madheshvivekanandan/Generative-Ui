@@ -56,6 +56,75 @@
   }
 }
 
+/* ---------- theming A2UI's basic catalog ----------
+   `@a2ui/react` injects its default theme as zero-specificity `:where()`
+   rules holding only custom properties, so remapping them onto our own tokens
+   is enough to make the standard Card, Row, Column, Text and Button match the
+   dashboard. No component is restyled by selector, which is what keeps this
+   surviving a renderer upgrade. */
+
+:root {
+  --a2ui-color-background: var(--page);
+  --a2ui-color-on-background: var(--text-primary);
+  --a2ui-color-surface: var(--surface);
+  --a2ui-color-on-surface: var(--text-primary);
+
+  --a2ui-color-primary: var(--series-1);
+  --a2ui-color-on-primary: #fff;
+  --a2ui-color-secondary: var(--surface);
+  --a2ui-color-on-secondary: var(--text-secondary);
+  --a2ui-color-border: var(--border);
+  --a2ui-color-input: var(--page);
+  --a2ui-color-on-input: var(--text-primary);
+
+  --a2ui-border-radius: var(--radius);
+  --a2ui-border-width: 1px;
+  --a2ui-border: 1px solid var(--border);
+
+  --a2ui-font-size: 14px;
+  --a2ui-font-family-title: var(--font);
+  --a2ui-line-height-body: 1.5;
+
+  --a2ui-column-gap: 16px;
+  --a2ui-row-gap: 16px;
+
+  --a2ui-button-padding: 5px 11px;
+  --a2ui-button-margin: 0;
+  --a2ui-button-border-radius: 999px;
+  --a2ui-button-box-shadow: none;
+  --a2ui-button-font-weight: 500;
+}
+
+/* Screen-reader-only live region: async results have to be announced, and
+   there is no visible element that would carry the message. */
+.sr-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The agent's on-card action buttons. Styled as chips to read as suggestions
+   rather than as form submits. Scoped to `.card` because A2UI renders no
+   wrapper class of its own -- the card is the only reliable ancestor. */
+.card button {
+  border: 1px solid var(--border);
+  background: var(--page);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.card button:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -140,34 +209,23 @@ textarea {
   background: var(--grid);
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 16px;
-}
-
-.grid-kpi {
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-}
-
-.span-2 {
-  grid-column: span 2;
-}
-
-@media (max-width: 760px) {
-  .span-2 {
-    grid-column: span 1;
-  }
-}
-
-/* ---------- card ---------- */
+/* ---------- card ----------
+   Our catalog owns `Card` rather than using A2UI's, so that every card can be
+   wrapped in its own error boundary. That means this class styles both a
+   rendered card and the boundary's fallback. */
 
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 18px;
+  /* Flex children default to min-width:auto, which lets a wide table push its
+     tile past its share of the Row. */
   min-width: 0;
+  /* Tighter than the gap between cards: A2UI's Column reads this variable, so
+     overriding it here reins in the spacing inside a card without touching the
+     spacing between them. */
+  --a2ui-column-gap: 10px;
 }
 
 .card-head {
@@ -182,6 +240,33 @@ textarea {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
+}
+
+/* ---------- one generated turn ----------
+   Layout inside a turn belongs to the agent: it arrives as A2UI Rows and
+   Columns. All this contributes is the frame around it and the line saying
+   which request produced it. */
+
+.turn {
+  margin-bottom: 20px;
+}
+
+.turn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.turn-prompt {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-sub {
@@ -205,10 +290,6 @@ textarea {
 .card-dismiss:hover {
   background: var(--hover);
   color: var(--text-primary);
-}
-
-.card-generated {
-  border-color: color-mix(in srgb, var(--series-1) 40%, var(--border));
 }
 
 /* ---------- stat ---------- */
