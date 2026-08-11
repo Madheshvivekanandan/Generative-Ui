@@ -9,9 +9,9 @@ in the frontend -- nothing else.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 Unit = Literal["USD", "%", "count", "none"]
 Direction = Literal["up", "down", "flat"]
@@ -107,7 +107,7 @@ class TextNote(BaseModel):
     body: str = Field(description="Two or three sentences at most.")
 
 
-Component = Union[StatCard, LineChart, BarChart, DonutChart, DataTable, TextNote]
+Component = StatCard | LineChart | BarChart | DonutChart | DataTable | TextNote
 
 COMPONENT_TYPES = ("stat_card", "line_chart", "bar_chart", "donut_chart", "data_table", "text_note")
 
@@ -129,7 +129,19 @@ class UIDecision(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    # Reject unknown keys outright rather than ignoring them, so a client
+    # sending the wrong shape finds out immediately.
+    model_config = ConfigDict(extra="forbid")
+
     message: str = Field(min_length=1, max_length=2000)
+
+
+ErrorCode = Literal[
+    "missing_api_key",
+    "schema_validation_failed",
+    "unusable_component",
+    "upstream_error",
+]
 
 
 class GenerateResponse(BaseModel):
@@ -144,4 +156,76 @@ class GenerateResponse(BaseModel):
     fallback: bool = Field(
         default=False, description="True when the component is a server-generated stand-in."
     )
-    error: str | None = None
+    error: ErrorCode | None = Field(
+        default=None,
+        description=(
+            "A stable code, never an exception message. Diagnostics stay in the server log; "
+            "anything more specific here would leak internals to the browser."
+        ),
+    )
+
+
+# --- Read models for the dashboard endpoint -------------------------------
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+    model: str
+    openai_key_set: bool
+
+
+class Period(BaseModel):
+    start: str
+    end: str
+
+
+class Kpi(BaseModel):
+    label: str
+    value: float
+    unit: Unit
+    delta_pct: float
+    delta_direction: Direction
+    caption: str
+
+
+class MonthlyRow(BaseModel):
+    month: str
+    revenue: float
+    expenses: float
+    cash_flow: float
+
+
+class CategoryAmount(BaseModel):
+    category: str
+    amount: float
+
+
+class ProductAmount(BaseModel):
+    product: str
+    amount: float
+
+
+class RegionAmount(BaseModel):
+    region: str
+    amount: float
+
+
+class Transaction(BaseModel):
+    date: str
+    description: str
+    category: str
+    amount: float
+    status: str
+
+
+class DashboardResponse(BaseModel):
+    """The mock dataset. Typed so OpenAPI documents it and the fixtures are validated."""
+
+    currency: str
+    period: Period
+    kpis: list[Kpi]
+    monthly: list[MonthlyRow]
+    expenses_by_category: list[CategoryAmount]
+    revenue_by_product: list[ProductAmount]
+    revenue_by_region: list[RegionAmount]
+    transactions: list[Transaction]
