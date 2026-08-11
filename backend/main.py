@@ -21,10 +21,12 @@ from mock_data import dashboard_payload, dataset_for_prompt
 from schemas import (
     BarChart,
     Component,
+    DashboardResponse,
     DataTable,
     DonutChart,
     GenerateRequest,
     GenerateResponse,
+    HealthResponse,
     LineChart,
     TextNote,
     UIDecision,
@@ -188,15 +190,17 @@ def ask_model(message: str) -> UIDecision:
     return choice.message.parsed
 
 
-@app.get("/api/health")
-def health() -> dict:
-    return {"status": "ok", "model": MODEL, "openai_key_set": bool(os.getenv("OPENAI_API_KEY"))}
+@app.get("/api/health", response_model=HealthResponse, summary="Liveness and configuration")
+def health() -> HealthResponse:
+    return HealthResponse(
+        status="ok", model=MODEL, openai_key_set=bool(os.getenv("OPENAI_API_KEY"))
+    )
 
 
-@app.get("/api/dashboard")
-def dashboard() -> dict:
+@app.get("/api/dashboard", response_model=DashboardResponse, summary="The mock dataset")
+def dashboard() -> DashboardResponse:
     """The mock dataset the dashboard renders on load."""
-    return dashboard_payload()
+    return DashboardResponse.model_validate(dashboard_payload())
 
 
 @app.post("/api/generate", response_model=GenerateResponse)
@@ -213,7 +217,7 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             ),
             follow_ups=DEFAULT_FOLLOW_UPS,
             fallback=True,
-            error="OPENAI_API_KEY is not set",
+            error="missing_api_key",
         )
 
     try:
@@ -240,24 +244,27 @@ def generate(request: GenerateRequest) -> GenerateResponse:
             explanation="The model picked a component it couldn't fill with usable data.",
             component=note(
                 "Could not render that",
-                f"Nothing renderable came back ({exc}). Try rephrasing your request.",
+                "Nothing renderable came back. Try rephrasing your request.",
             ),
             follow_ups=DEFAULT_FOLLOW_UPS,
             fallback=True,
-            error=str(exc),
+            error="unusable_component",
         )
-    except Exception as exc:  # network, auth, rate limit, anything upstream
+    except Exception:  # network, auth, rate limit, anything upstream
+        # The detail stays in the log on purpose: an upstream exception message
+        # can contain a partial API key or other internals, and this response
+        # is rendered verbatim in the browser.
         logger.exception("generation failed")
         return GenerateResponse(
             ok=False,
             explanation="The request to the model failed.",
             component=note(
                 "Something went wrong",
-                f"{type(exc).__name__}: {exc}. Check the server logs and try again.",
+                "The dashboard couldn't reach the model. Check the server logs and try again.",
             ),
             follow_ups=DEFAULT_FOLLOW_UPS,
             fallback=True,
-            error=f"{type(exc).__name__}: {exc}",
+            error="upstream_error",
         )
 
     return GenerateResponse(
