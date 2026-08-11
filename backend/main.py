@@ -1,97 +1,55 @@
-"""Generative UI backend.
+"""Generative UI backend, speaking A2UI v0.9.
 
-POST a free-text message, get back one validated dashboard component to render.
-The endpoint never raises to the client: every failure path -- missing API key,
-OpenAI error, schema violation -- resolves to a text_note so the frontend has a
-single happy path and can never be handed a shape it does not understand.
+POST a free-text message and the response is a stream of A2UI messages that
+`@a2ui/react` renders directly -- `createSurface`, then `updateDataModel` and
+`updateComponents` as the agent composes the answer. Buttons the agent puts on
+those cards post back to `/api/action`, which is the client-to-server half of
+the loop and re-enters the same generator with the conversation intact.
+
+The stream never raises to the client: a missing API key, an OpenAI error or a
+schema violation all resolve to a `text_note` block, so the renderer is never
+handed a surface it cannot draw.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import uuid
+from typing import Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
-from pydantic import ValidationError
+from fastapi.responses import StreamingResponse
 
-from mock_data import dashboard_payload, dataset_for_prompt
+import a2ui
+import agent
+import baseline
+from mock_data import dashboard_payload
 from schemas import (
-    BarChart,
-    Component,
+    ActionRequest,
     DashboardResponse,
-    DataTable,
-    DonutChart,
     GenerateRequest,
-    GenerateResponse,
     HealthResponse,
-    LineChart,
-    TextNote,
-    UIDecision,
 )
+from session import store
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("genui")
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
 ).split(",")
 
-MAX_SERIES = 4
-MAX_POINTS = 24
-MAX_SLICES = 6
-MAX_ROWS = 25
-MAX_FOLLOW_UPS = 3
-MAX_FOLLOW_UP_CHARS = 70
+# The baseline dashboard's surface. Fixed, so a reload replaces it rather than
+# stacking a second copy alongside the first.
+BASELINE_SURFACE = "dashboard"
 
-# Shown when the model never got far enough to suggest anything of its own.
-DEFAULT_FOLLOW_UPS = [
-    "Show revenue as a line chart",
-    "Expenses by category as a bar chart",
-    "What was net cash flow in August?",
-]
-
-SYSTEM_PROMPT = f"""You are the rendering engine for a financial dashboard. The user \
-describes what they want to see; you choose exactly one UI component from the catalog \
-and fill it with real numbers from the dataset below.
-
-Rules:
-- Use only numbers that appear in the dataset, or arithmetic derived from them \
-(sums, differences, percentages, averages). Never invent figures.
-- Pick the component that fits the question, not the one the user names, unless they \
-name one explicitly. Trends over months are line charts. Comparisons across categories \
-are bar charts. A single figure is a stat card. Composition of a whole is a donut, and \
-only when the parts really do sum to that whole. Lists of records are tables.
-- At most {MAX_SERIES} series per chart and at most {MAX_SLICES} donut slices; roll the \
-tail into "Other".
-- Sort categorical data largest first. Keep time series in chronological order.
-- Table cells are pre-formatted strings: thousands separators, a leading "$" on money, \
-a leading "-" for money out.
-- When asked for the largest, smallest, top or biggest records, sort by the relevant \
-measure across the WHOLE dataset before selecting, and return every row that qualifies \
-(up to {MAX_ROWS}). Do not stop at the first few rows you happen to read.
-- If the request is unrelated to this data or cannot be answered from it, return a \
-text_note saying so plainly. Do not guess.
-- Every component needs a short, specific title -- "Revenue by Month", not "A chart of \
-the revenue" and never the literal word "Title". This applies to text_note too: title \
-it with the subject, e.g. "Out of scope".
-- Always return exactly three follow_ups: short requests the user could send next, \
-phrased the way they would type them ("Compare against expenses", not "Would you like \
-to compare against expenses?"). Each must be answerable from this dataset, must lead \
-somewhere different from the other two, and must not restate the request you just \
-answered. Under 60 characters each. If the request was out of scope, suggest three \
-things this dashboard CAN answer.
-
-DATASET
-{dataset_for_prompt()}
-"""
-
-app = FastAPI(title="Generative UI — Financial Dashboard", version="1.0.0")
+app = FastAPI(title="Generative UI — A2UI Financial Dashboard", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in ALLOWED_ORIGINS],
@@ -99,177 +57,110 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_client: OpenAI | None = None
 
+def _sse(event: agent.Event) -> str:
+    """One A2UI message (or one chat-metadata object) as an SSE frame.
 
-def get_client() -> OpenAI:
-    """Lazily build the OpenAI client so the app still boots without a key."""
-    global _client
-    if _client is None:
-        _client = OpenAI()  # reads OPENAI_API_KEY from the environment
-    return _client
-
-
-def note(title: str, body: str) -> TextNote:
-    return TextNote(type="text_note", title=title, body=body)
-
-
-def clean_follow_ups(raw: list[str], asked: str) -> list[str]:
-    """Trim, de-duplicate and drop anything that just echoes the request.
-
-    Unlike the component, a bad follow-up is not worth failing the request
-    over -- an empty list simply renders no chips.
+    A2UI's own MIME type is `application/a2ui+json` over a JSONL stream; SSE
+    carries the same JSON objects one per frame, which is what the browser can
+    consume without a custom transport. The `event:` name tells the client
+    which of the two channels a frame belongs to.
     """
-    seen: set[str] = {asked.strip().casefold()}
-    cleaned: list[str] = []
-
-    for item in raw:
-        text = " ".join(item.split())
-        key = text.casefold()
-        if not text or len(text) > MAX_FOLLOW_UP_CHARS or key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(text)
-        if len(cleaned) == MAX_FOLLOW_UPS:
-            break
-
-    return cleaned
+    return f"event: {event.kind}\ndata: {json.dumps(event.payload)}\n\n"
 
 
-def sanitize(component: Component) -> Component:
-    """Enforce the limits the prompt asks for but the schema cannot express.
+def _turn_stream(session_id: str, message: str) -> Iterator[str]:
+    """Run one turn, forwarding every message and recording the transcript."""
+    history = store.history(session_id)
+    surface_id = f"turn-{uuid.uuid4().hex[:12]}"
 
-    Structured outputs guarantee the shape, not the sense of it -- a model can
-    still return nine series or a table row with the wrong number of cells. We
-    trim what is trimmable and raise on what is not, so the caller can fall back.
-    """
-    if isinstance(component, (LineChart, BarChart)):
-        component.series = component.series[:MAX_SERIES]
-        if not component.series:
-            raise ValueError("chart has no series")
-        for series in component.series:
-            series.points = series.points[:MAX_POINTS]
-        if not any(series.points for series in component.series):
-            raise ValueError("chart has no data points")
+    # The client needs the surface id before anything else so it can slot the
+    # card into the layout the moment createSurface lands.
+    yield f"event: open\ndata: {json.dumps({'surface_id': surface_id})}\n\n"
 
-    elif isinstance(component, DonutChart):
-        slices = [s for s in component.slices if s.value > 0][:MAX_SLICES]
-        if len(slices) < 2:
-            raise ValueError("donut needs at least two positive slices")
-        component.slices = slices
+    summary = ""
+    try:
+        for event in agent.run(message, history, surface_id):
+            if event.kind == "meta":
+                rendered = event.payload.get("rendered") or []
+                summary = event.payload.get("explanation", "")
+                if rendered:
+                    summary = f"{summary} [rendered: {', '.join(rendered)}]"
+            yield _sse(event)
+    finally:
+        # Recorded even on a fallback: the user asked, and the next turn should
+        # know they asked, whatever came back.
+        store.record(session_id, message, summary or "(nothing rendered)")
 
-    elif isinstance(component, DataTable):
-        if not component.columns:
-            raise ValueError("table has no columns")
-        width = len(component.columns)
-        # Drop malformed rows rather than shipping a ragged table.
-        component.rows = [row for row in component.rows[:MAX_ROWS] if len(row) == width]
-        if not component.rows:
-            raise ValueError("table has no well-formed rows")
-
-    return component
+    yield "event: done\ndata: {}\n\n"
 
 
-def ask_model(message: str) -> UIDecision:
-    """One structured-output call. The response_format IS the component catalog."""
-    client = get_client()
-    completion = client.beta.chat.completions.parse(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ],
-        response_format=UIDecision,
-        temperature=0.2,
+def _stream_response(session_id: str, message: str) -> StreamingResponse:
+    return StreamingResponse(
+        _turn_stream(session_id, message),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # nginx buffers proxied responses by default, which would hold the
+            # whole stream until the turn finished and defeat the point.
+            "X-Accel-Buffering": "no",
+        },
     )
-    choice = completion.choices[0]
-    if choice.message.refusal:
-        raise ValueError(f"model refused: {choice.message.refusal}")
-    if choice.message.parsed is None:
-        raise ValueError("model returned no parseable output")
-    return choice.message.parsed
 
 
 @app.get("/api/health", response_model=HealthResponse, summary="Liveness and configuration")
 def health() -> HealthResponse:
     return HealthResponse(
-        status="ok", model=MODEL, openai_key_set=bool(os.getenv("OPENAI_API_KEY"))
+        status="ok",
+        model=agent.MODEL,
+        openai_key_set=bool(os.getenv("OPENAI_API_KEY")),
+        protocol=a2ui.VERSION,
+        catalog_id=a2ui.CATALOG_ID,
     )
 
 
 @app.get("/api/dashboard", response_model=DashboardResponse, summary="The mock dataset")
 def dashboard() -> DashboardResponse:
-    """The mock dataset the dashboard renders on load."""
+    """The raw mock dataset. Kept for `curl` and `/docs`; the UI uses the A2UI form."""
     return DashboardResponse.model_validate(dashboard_payload())
 
 
-@app.post("/api/generate", response_model=GenerateResponse)
-def generate(request: GenerateRequest) -> GenerateResponse:
-    """Turn a free-text request into one validated dashboard component."""
-    if not os.getenv("OPENAI_API_KEY"):
-        return GenerateResponse(
-            ok=False,
-            explanation="The server has no OpenAI API key configured.",
-            component=note(
-                "Missing API key",
-                "Set OPENAI_API_KEY in the server's environment and restart it, then try again. "
-                "Locally that is backend/.env; under Docker it is the .env next to compose.yaml.",
-            ),
-            follow_ups=DEFAULT_FOLLOW_UPS,
-            fallback=True,
-            error="missing_api_key",
-        )
+@app.get("/api/dashboard/a2ui", summary="The baseline dashboard as A2UI messages")
+def dashboard_a2ui() -> dict:
+    """The load-time dashboard, compiled by the same path a generated turn takes.
 
-    try:
-        decision = ask_model(request.message)
-        component = sanitize(decision.component)
-    except ValidationError as exc:
-        logger.warning("model output failed validation: %s", exc)
-        return GenerateResponse(
-            ok=False,
-            explanation="The model's response didn't match the component schema.",
-            component=note(
-                "Could not render that",
-                "The model returned something outside the component catalog. "
-                "Try rephrasing, for example: 'show revenue by month as a line chart'.",
-            ),
-            follow_ups=DEFAULT_FOLLOW_UPS,
-            fallback=True,
-            error="schema validation failed",
-        )
-    except ValueError as exc:
-        logger.warning("unusable component: %s", exc)
-        return GenerateResponse(
-            ok=False,
-            explanation="The model picked a component it couldn't fill with usable data.",
-            component=note(
-                "Could not render that",
-                "Nothing renderable came back. Try rephrasing your request.",
-            ),
-            follow_ups=DEFAULT_FOLLOW_UPS,
-            fallback=True,
-            error="unusable_component",
-        )
-    except Exception:  # network, auth, rate limit, anything upstream
-        # The detail stays in the log on purpose: an upstream exception message
-        # can contain a partial API key or other internals, and this response
-        # is rendered verbatim in the browser.
-        logger.exception("generation failed")
-        return GenerateResponse(
-            ok=False,
-            explanation="The request to the model failed.",
-            component=note(
-                "Something went wrong",
-                "The dashboard couldn't reach the model. Check the server logs and try again.",
-            ),
-            follow_ups=DEFAULT_FOLLOW_UPS,
-            fallback=True,
-            error="upstream_error",
-        )
+    It arrives in one `createSurface` rather than a stream because none of it
+    is being composed live -- but the components and bindings are identical to
+    what the agent emits, which is the point.
+    """
+    return {
+        "surface_id": BASELINE_SURFACE,
+        "messages": a2ui.full_surface(BASELINE_SURFACE, baseline.blocks()),
+    }
 
-    return GenerateResponse(
-        ok=True,
-        explanation=decision.explanation,
-        component=component,
-        follow_ups=clean_follow_ups(decision.follow_ups, request.message),
-    )
+
+@app.post("/api/generate", summary="Stream A2UI messages for one request")
+def generate(request: GenerateRequest) -> StreamingResponse:
+    """Turn a free-text request into a stream of A2UI v0.9 messages."""
+    return _stream_response(request.session_id, request.message)
+
+
+@app.post("/api/action", summary="Handle an A2UI action from the renderer")
+def action(request: ActionRequest) -> StreamingResponse:
+    """The client-to-server half of A2UI: a user pressed a generated button.
+
+    The agent attached the request it wants back as the action's `prompt`
+    context, so handling any action is just re-entering the generator with
+    that text. One handler covers every button the model can invent.
+    """
+    if request.name != a2ui.REFINE_ACTION:
+        logger.warning("ignoring unknown action: %s", request.name)
+
+    prompt = (request.context.get("prompt") or "").strip()
+    if not prompt:
+        # Nothing actionable arrived; say so through the same stream shape
+        # rather than inventing an error the client would have to special-case.
+        prompt = "Explain what this dashboard can show me."
+
+    return _stream_response(request.session_id, prompt)
