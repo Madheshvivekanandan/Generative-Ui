@@ -17,12 +17,16 @@ export default class ErrorBoundary extends Component {
 
   render() {
     if (this.state.error) {
+      // The message stays in the console: a render-error string is internal
+      // detail (component stacks, upstream text) and not useful to a reader.
       return (
         <section className="card">
           <div className="card-head">
             <h2 className="card-title">Couldn't render this card</h2>
           </div>
-          <p className="note-body">{String(this.state.error.message || this.state.error)}</p>
+          <p className="note-body">
+            Something went wrong drawing this component. The details are in the browser console.
+          </p>
         </section>
       )
     }
