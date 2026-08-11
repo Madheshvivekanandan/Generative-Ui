@@ -1,422 +1,216 @@
 ---
 name: react-best-practices
-description: React/TypeScript engineering standard for Vite + React 18 SPAs built with Refine, MUI, react-hook-form, and react-router v6. Load BEFORE writing, modifying, or reviewing any React code in such an app — anything under src/ (pages/, components/, providers/, hooks) or any .tsx/.ts component, hook, data fetch, form, MUI DataGrid, or theme change. Covers component architecture, naming, state management, TypeScript, error handling, forms, testing, security, accessibility, performance (waterfalls, bundle size, re-renders), tooling gates, and a review checklist.
-license: MIT
-metadata:
-  perf-rules-adapted-from: vercel-labs/agent-skills — skills/react-best-practices (MIT, v1.0.0)
-  stack: vite + react 18 + typescript + refine + mui
+description: React standard for the Gen_Ui frontend — a Vite + React 19 SPA (plain JSX, no TypeScript) that renders a financial dashboard from an LLM-chosen component catalog, using Recharts. Load BEFORE writing, modifying, or reviewing any frontend code in this repo — anything under frontend/src/ (App.jsx, api.js, lib/, components/) or any .jsx/.css file. Covers the renderer contract, defensive rendering, error boundaries, chart/palette rules, state, a11y, performance, and a review checklist.
 ---
 
-# React Best Practices (Vite + Refine + MUI SPA)
+# React Best Practices — Gen_Ui frontend
 
-Correctness and clarity first, then performance. Performance rule IDs
-(`async-parallel`, `rerender-memo`, …) come from **Vercel Engineering's
-react-best-practices** (MIT) and stay traceable upstream:
-`https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices/rules`
+Correctness and clarity first, then performance. Adapted from React docs, Vercel
+Engineering's react-best-practices (MIT), and WCAG, cut down to what this app is.
+**When this document conflicts with the existing code, follow the code and say so.**
 
-## 0. Target Stack & What Does Not Apply
-
-This skill targets a **Vite + React 18 SPA** (TypeScript 5.4, `strict: true`), not Next.js:
+## 0. This project — the actual stack
 
 ```
-src/
-  pages/<feature>/          # route screens
-    components/             #   feature-local components
-  components/common/, components/layout/
-  providers/                # Refine data/auth providers (dataProvider.ts, authProvider)
-  interfaces/               # shared domain types
-  config/, theme/, utils/
+frontend/src/
+  main.jsx                 # entry
+  App.jsx                  # layout, dashboard state, baseline component objects
+  api.js                   # the ENTIRE backend contract — the only place fetch appears
+  index.css                # design tokens + all styling (no CSS-in-JS, no framework)
+  lib/format.js            # number formatting + series color slots
+  components/
+    ComponentRenderer.jsx  # the whitelist dispatch — the heart of the app
+    ChatBox.jsx  Card.jsx  ErrorBoundary.jsx  ChartTooltip.jsx
 ```
 
-- Stack: `@refinedev/core` + `@refinedev/mui`, MUI 5 (`@mui/material`, `@mui/x-data-grid`,
-  `@mui/x-date-pickers`), `react-hook-form`, `react-router-dom` v6, `axios`, `dayjs`.
-- Import alias `@/*` → `src/*` is configured — prefer it over deep `../../..` chains.
-- Money is **INR**. Use a shared formatter (`Intl.NumberFormat("en-IN", {currency:"INR"})`);
-  never hand-concatenate a symbol, never float-accumulate currency.
+- **Vite + React 19, plain JSX. There is no TypeScript**, no `tsc`, no type-checking gate.
+- **Recharts** is the only runtime dependency beyond React.
+- **Plain CSS with custom properties** in `index.css`. No MUI, no Tailwind, no styled-components.
+- No router, no state library, no data-fetching library.
 
-**Upstream rules that DO NOT apply here — never suggest them:**
+**Rules that do not apply here — never suggest them:** RSC / `"use client"`, anything
+`next/*`, SSR/hydration, Refine or TanStack Query hooks, MUI barrel-import rules,
+react-hook-form, `useSearchParams` (there is no router).
 
-| Not applicable | Why |
+## 1. The renderer contract
+
+The backend sends `{type, ...props}` chosen from a fixed catalog. `ComponentRenderer.jsx`
+turns that into a card. This is the one thing to understand before editing anything.
+
+- **Dispatch through the `RENDERERS` whitelist**, checked with
+  `Object.prototype.hasOwnProperty`. Never `RENDERERS[component.type]` bare — an unknown
+  or prototype-polluting `type` must render an explanatory card, not throw.
+- **Treat every field as untrusted.** The payload comes from an LLM. Read it through the
+  `str()` / `num()` / `arr()` coercers at the top of the file; never index into
+  `component.series[0].points[0]` directly. A `null`, a string where a number belongs, or
+  a missing array is expected input, not an exceptional case.
+- **A renderer returns `<EmptyState/>` rather than throwing** when there is nothing to
+  draw. Empty is a normal outcome.
+- **Adding a component type is exactly two edits**: a Pydantic model in `backend/schemas.py`
+  and a renderer registered in `RENDERERS`. Wide types also go in `WIDE_TYPES`.
+- **The baseline dashboard uses the same catalog.** `baselineComponents()` in `App.jsx`
+  builds the load-time cards as plain component objects through the same renderer. Never
+  add a privileged path for "real" cards — if it renders on load, the model can produce it.
+
+## 2. Error handling — the app must not be able to crash
+
+This is the product requirement, not a nicety. Five layers, each catching what the others
+cannot; **never remove one because another looks sufficient.**
+
+| Layer | Catches |
 |---|---|
-| RSC / Server Components, `"use client"` | No RSC; everything is a client component. |
-| `next/dynamic`, `next/image`, `next/font`, `next/script` | No Next.js. Use `React.lazy` + `<Suspense>`. |
-| Server actions, `server-auth-actions`, `after()` | No server runtime; this is a pure client SPA calling a separate backend API. |
-| `server-cache-react` (`React.cache()`), RSC prop serialization | Server-only APIs. |
-| SSR hydration rules (`rendering-hydration-*`) | SPA — no SSR/hydration step. |
-| SWR (`client-swr-dedup`) | Refine wraps TanStack Query, which already dedupes/caches. Don't add SWR. |
+| Backend structured outputs | invented component types, missing props |
+| Backend `sanitize()` | valid shape, unusable content |
+| `api.js` try/catch | network down, non-JSON, non-2xx |
+| Coercers + whitelist in `ComponentRenderer` | wrong types, nulls, unknown `type` |
+| `<ErrorBoundary>` per card | any render-time throw |
 
-## 1. Philosophy
+- **Every card is individually wrapped in `<ErrorBoundary>`.** One bad card must never
+  blank the dashboard.
+- **`api.js` resolves, it does not throw**, for `generateComponent` — it returns a
+  synthetic `text_note` on network failure so callers have one shape to handle.
+- **Never render a raw error string to the user.** Error boundaries and fallback cards show
+  generic prose; the detail goes to `console.error`. Backend exception text and component
+  stacks are internal detail.
+- Show **loading, empty, and error** as three distinct states. Never conflate empty with error.
+- Boundaries catch render errors only — never async or event-handler errors. Those need
+  explicit try/catch.
 
-- **Readability over cleverness**; the next reader is the maintainer.
-- **Correctness and clarity before optimization.** Only optimize with a measurement.
-- **Colocate, then extract.** Keep code near its use; extract when a second caller appears.
-- **One responsibility per component.** Data-shaping, side effects and markup want separating.
-- **Make invalid states unrepresentable** with types, rather than defending against them at runtime.
-- **Never leave the user staring at a blank screen** — every async path has loading and error states.
+## 3. State
 
-## 2. Component Architecture & Naming
+- **Local `useState` in the nearest owner** is correct here. There is no server-state
+  library and no router, so a `useEffect` + `fetch` + `setState` for the dashboard payload
+  is the right call, not a smell — but keep it to `api.js` calls in `App.jsx`, and keep the
+  `cancelled` flag so a late response cannot set state after unmount.
+- **Derive, never duplicate.** `baseline` is a `useMemo` over the fetched dataset, not a
+  second piece of state. No `useEffect` that only computes something render could.
+- **Functional updates** (`setMessages(prev => …)`) so callbacks stay stable.
+- IDs come from a `useRef` counter, never array index or `Date.now()`.
+- Name state for its domain: `dashboard`, `generated`, `messages`. **Never `data`, `item`,
+  `tmp`, `res`, `x`.**
 
-**Size limits (enforced in review).** Extract past these:
+## 4. Components & naming
 
 | Unit | Limit |
 |---|---|
-| Component file | **≤ 250 lines** |
-| Component function body | ≤ 120 lines / ≤ 5 hooks doing unrelated work |
-| JSX nesting depth | ≤ 4 |
-| Props on one component | ≤ 8 (past that, group into an object or split) |
+| Component file | ≤ 250 lines |
+| Component body | ≤ 120 lines |
+| JSX nesting | ≤ 4 |
+| Props | ≤ 8 |
 
-> This codebase currently violates this: `ManagerSettingsPage.tsx` (846 lines),
-> `EnquiryLineItemsCard.tsx` (532), `POValidateCard.tsx` (470), `InvoiceReviewPanel.tsx` (453),
-> `DispatchTrackingCard.tsx` (424). **Don't grow them further** — when editing one, extract the
-> part you touch into `pages/<feature>/components/`. Don't refactor wholesale unless asked.
+`ComponentRenderer.jsx` is near the file limit by design — it holds all six renderers plus
+dispatch, which keeps the catalog readable in one place. **If it grows past ~300 lines,
+split the renderers into `components/renderers/` rather than trimming the coercers.**
 
-- **Split by responsibility:** a page composes; child components render sections; **custom hooks
-  own data + logic**. If a component both fetches/derives and renders 200 lines of JSX, the
-  fetch/derive half becomes `use<Feature>()` in the feature folder.
-- **New feature** → `pages/<feature>/` with a `<Feature>Page.tsx` + `components/`.
-  Reusable across features → `components/common/`. Shared types → `interfaces/`.
-- **Composition over prop-drilling and over configuration flags.** Prefer `children`/slots to a
-  `variant`-plus-ten-booleans API. Past 2 levels of drilling, use context or restructure.
-- **No inline component definitions** — see `rerender-no-inline-components` (§8).
+- **Never define a component inside a component** — it remounts and loses state every
+  parent render. `Suggestions` in `ChatBox.jsx` is module-scope for this reason.
+- `handle*` for internal handlers, `on*` for props. `is/has/can/should` for booleans.
+- `UPPER_SNAKE` module constants — `MAX_SERIES`, `OPENERS`, `CHART_HEIGHT`. No inline magic numbers.
+- Ternaries for conditional render, never `&&` with a possibly-numeric left side
+  (`{count && <X/>}` renders a literal `0`).
 
-**Naming**
+## 5. Charts (Recharts) — the palette is validated, don't improvise
 
-| Kind | Convention | Good | Bad |
-|---|---|---|---|
-| Component file + fn | `PascalCase`, matching | `CreditProfileCard.tsx` | `card2.tsx`, `index.tsx` everywhere |
-| Hook | `use` + noun/verb | `useTicketFilters()` | `ticketStuff()` |
-| Event handler (internal) | `handle*` | `handleSubmit` | `onSubmitClick2`, `doIt` |
-| Event prop (external) | `on*` | `onApprove` | `approveCb` |
-| Boolean prop/state | `is/has/can/should*` | `isCreditBlocked` | `flag`, `status2` |
-| Constant | `UPPER_SNAKE` module scope | `MAX_LINE_ITEMS` | inline `50` |
-| Type / interface | `PascalCase`, no `I` prefix | `Ticket`, `CreditProfile` | `ITicket`, `TicketType2` |
-| Units in the name | always | `timeoutMs`, `amountInr` | `timeout`, `amount` |
+The color system was validated for colorblind separation against both surfaces. Treat it
+as fixed.
 
-- Name for the **domain**, not the mechanism: `unpaidInvoices`, not `data2`/`filteredList`.
-- Never `data`, `item`, `tmp`, `res`, `x` as a meaningful identifier.
+- **Series colors come from `seriesColor(index)` in `lib/format.js`**, assigned by slot in
+  fixed order. Never hardcode a hex in a component, and never let color follow rank —
+  filtering a series out must not repaint the survivors.
+- **Cap at 4 series / 6 donut slices.** These mirror the backend's `sanitize()` limits;
+  change both together.
+- **One y-axis. Never a dual-axis chart.** Two measures of different scale → two cards.
+- Colors are CSS custom properties (`var(--series-1)`) so light/dark swap in one place.
+  Both modes are defined in `index.css` — dark is a selected set of steps, not a flip.
+- Every chart ships a hover tooltip (`ChartTooltip`) and a legend when there are ≥ 2 series
+  (one series needs none — the title names it).
+- Thin marks: 2px lines, `dot={false}` with an `activeDot` on hover, 4px bar corner radius,
+  a 2px surface-colored gap between stacked fills.
+- Numbers go through `formatCompact` (axes) / `formatFull` (tooltips, stat values). Never
+  hand-concatenate a currency symbol.
+- Text wears text tokens (`--text-primary/secondary/muted`), never a series color.
 
-## 3. State Management — Pick the Right Location
+## 6. Accessibility
 
-Choosing wrong here causes most React bugs. In priority order:
+- Icon-only controls need an accessible name — the card dismiss button uses `aria-label`.
+- The chat input has an `aria-label`; keep it, there is no visible `<label>`.
+- Announce async results: the "Thinking…" row and new-card arrival should be reachable by
+  a screen reader (`role="status"` is the cheapest fix — **currently missing, worth adding**).
+- Semantic elements first: `<main>`, `<aside>`, `<section>`, `<table>`, real `<button>`s.
+- Never encode meaning by color alone — the KPI delta pairs its color with an arrow glyph.
+- Keep focus outlines. Body text contrast ≥ 4.5:1.
 
-1. **Server state → Refine hooks** (`useList`, `useOne`, `useCustom`, `useUpdate`).
-   Never mirror fetched data into `useState`; that's a stale-copy bug. Never hand-roll
-   `useEffect` + `axios` + `setState` — you lose dedup, caching, and cancellation.
-2. **URL state → `useSearchParams`** (react-router v6). **Filters, pagination, sort, active tab,
-   and selected-row id belong in the URL**, not `useState`. Makes views shareable and
-   refresh-survivable. This is the most-missed rule in table-heavy screens
-   (tickets, receivables, payables).
-3. **Local UI state → `useState`/`useReducer`** in the *nearest* owner: open/closed, hover, draft
-   input. `useReducer` once 3+ fields change together or transitions have rules.
-4. **Cross-cutting → context**, sparingly (auth/user, theme, notifications). Split providers by
-   concern and keep values memoized — one god-context re-renders the whole app on any change.
+## 7. Performance
 
-- **Derive, don't duplicate.** Compute during render from the source of truth; no `useEffect` to
-  sync two pieces of state (see `rerender-derived-state-no-effect`).
-- **Single source of truth.** If two states can disagree, one must be derived.
-- Reset child state on identity change with a `key`, not an effect.
+Correctness first; only optimize with a measurement. Relevant here:
 
-## 4. TypeScript
+- **`recharts` is imported as a barrel and the bundle is ~609 kB (178 kB gzipped), one
+  chunk, no code splitting.** This is the known baseline. If it becomes a problem, the fix
+  is `React.lazy` + `<Suspense>` around the chart renderers, not shaving elsewhere.
+- Stable, data-derived `key`s. Array index is acceptable *only* for the table body rows,
+  which are never reordered or filtered — anywhere else it is a bug.
+- No `await` inside a loop; independent requests go in `Promise.all`.
+- `useMemo`/`useCallback` where they prevent real work (`baseline`, `send`, `dismiss`) —
+  not on primitive comparisons.
+- Only `.dashboard` and `.chat-log` scroll; `.shell` is `overflow: hidden`. Keep it that
+  way or the fixed layout breaks.
 
-- `strict: true` is on — keep it. **`tsc` gates `npm run build`.**
-- **No `any`.** Use `unknown` + narrowing, a real interface, or a generic. If unavoidable, a
-  comment must justify it. *(Baseline debt: 78 existing `any`s — don't add more; remove those you touch.)*
-- **Type API responses at the boundary** (`interfaces/`) and use those types inward. Don't let
-  `any` from `axios`/`dataProvider` leak into components.
-- **Discriminated unions over optional-flag soup** — model states as
-  `{status:"loading"} | {status:"error"; error:E} | {status:"ok"; data:D}`, so impossible
-  combinations don't typecheck.
-- Prefer `type` for unions/aliases, `interface` for object shapes that may be extended.
-  No `I` prefix. `satisfies` to keep literal inference while checking a shape.
-- `import type { … }` for type-only imports (lint enforces).
-- Type props explicitly; avoid `React.FC` (obscures generics/children). Use
-  `ComponentProps<typeof X>` to extend MUI component props rather than restating them.
-- Never `@ts-ignore`; `@ts-expect-error` with a reason comment if truly needed.
-
-## 5. Error Handling & Resilience
-
-- **Error boundaries are mandatory.** Without one, a single render throw blanks the entire SPA.
-  Wrap (a) the app shell and (b) each independently-failing panel — a dashboard card must not
-  take down the page. Boundaries catch *render* errors only, never async/event-handler errors.
-- **Every mutation handles failure.** Never fire-and-forget a write: on failure, surface a
-  message, keep the user's input, and re-enable the control. Never swallow — no empty `catch`.
-- **Map status codes to behaviour**, centrally in the provider/interceptor:
-  `401` → re-auth; `403` → forbidden view (this repo has a `forbidden/` route);
-  `422` → field-level form errors (§6); `5xx`/network → retryable "something went wrong".
-- **Retries** only for idempotent reads (GET), bounded with backoff. **Never auto-retry a
-  non-idempotent write** — retrying a credit approval or invoice post can double-apply it.
-- Timeouts on every request; treat "no response" as a failure state, not a permanent spinner.
-- Show three distinct states — **loading / empty / error** — and never conflate empty with error.
-- Log with `console.error` and real context; **never log tokens, credentials, or customer PII**.
-
-## 6. Forms & Validation (react-hook-form)
-
-These screens move money — credit requests, invoices, dispatch. Treat forms as critical paths.
-
-- **Schema-validate** (zod/yup + resolver) as the single source of truth for rules; infer the TS
-  type from the schema so types and validation can't drift.
-- **Validate on the server too, always.** Client validation is UX, never a trust boundary.
-- **Prevent double submit:** disable the submit control while `isSubmitting`. A double-click that
-  posts a payment twice is a data-integrity incident.
-- **Map server field errors back onto fields** via `setError`, with a form-level message for
-  non-field errors. Don't drop a 422 into a toast and lose which field was wrong.
-- MUI inputs go through **`Controller`** (they're controlled); keep uncontrolled `register` where
-  possible for fewer re-renders.
-- Subscribe narrowly: **`useWatch` on the specific field**, never `watch()` on the whole form
-  (re-renders everything per keystroke).
-- Warn on navigate-away when `isDirty`. Reset via `reset()` after a successful submit.
-- Money/quantity inputs: parse and validate as fixed-precision; enforce min/max and step; reject
-  negatives explicitly rather than relying on the input type.
-- Dates: the backend stores **UTC**. Convert at the boundary with `dayjs` and be explicit about
-  timezone — naive local parsing produces off-by-one-day delivery dates.
-
-## 7. Testing
-
-No test framework is configured yet (**gap — recommend Vitest + React Testing Library + MSW**).
-Until it exists, don't claim tests were run. Once present:
-
-- **Vitest + RTL + `@testing-library/user-event`**; **MSW** to mock the API at the network layer.
-- **Test behaviour, not implementation.** Query by role/label/text as a user would
-  (`getByRole("button", {name:/approve/i})`); never assert on state internals or snapshot whole trees.
-- **Cover per feature:** happy path; **empty, loading, and error states**; validation failures;
-  permission-denied (RBAC) rendering; and the money/rounding edges.
-- Test **custom hooks** directly (`renderHook`) — that's where logic should live and it's the
-  cheapest place to assert it.
-- Deterministic: fake timers, fixed clock (no `new Date()` in assertions), seeded data, no
-  network, no `sleep`. Use builders/factories over giant literal fixtures.
-- **Every bug fix ships a regression test** that fails before the fix.
-- Priority when adding coverage to an untested codebase: money/credit logic → form validation →
-  status transitions → table filtering. Don't chase a coverage % on presentational markup.
-
-## 8. Performance
-
-### Waterfalls (CRITICAL)
-
-- **`async-parallel`** — independent requests in `Promise.all`, never sequential `await`s.
-- **`async-cheap-condition-before-await`** — cheap sync checks (permission, empty input) first.
-- **`async-defer-await`** — start the promise early, `await` only in the branch that needs it.
-- **`async-dependencies`** — don't make C wait on A when only B depends on A.
-- **`async-suspense-boundaries`** — `<Suspense>` per region so one slow panel doesn't block the screen.
-
-```ts
-// Bad — 3 sequential round trips
-const ticket   = await api.getTicket(id);
-const credit   = await api.getCredit(ticket.customerId);
-const products = await api.listProducts();
-
-// Good — products is independent; credit genuinely depends on ticket
-const productsPromise = api.listProducts();
-const ticket = await api.getTicket(id);
-const [credit, products] = await Promise.all([
-  api.getCredit(ticket.customerId),
-  productsPromise,
-]);
-```
-
-Never `await` inside a loop over rows — collect promises, then `Promise.all`.
-
-### Bundle size (CRITICAL)
-
-- **`bundle-barrel-imports`** — import concrete modules. Biggest win here; **52 existing barrel
-  imports** are lint-flagged:
-
-```ts
-// Bad
-import { Button, Dialog } from "@mui/material";
-// Good
-import Button from "@mui/material/Button";
-import DeleteIcon from "@mui/icons-material/Delete";
-```
-
-  Type-only barrels (`interfaces/`) are fine — erased at compile time. Component barrels are not.
-- **`bundle-dynamic-imports`** — `React.lazy` + `<Suspense>` for heavy/deferred UI: DataGrid
-  screens, date pickers, charts, export/print views, large dialogs. Route-level splitting per
-  `pages/<feature>` is the cheapest win.
-- **`bundle-analyzable-paths`** — static literal import paths only; no template-string `import()`.
-- **`bundle-conditional`** — load admin/export-only modules when activated, not at module scope.
-- **`bundle-defer-third-party`** / **`bundle-preload`** — analytics after first paint; `import()`
-  on nav hover/focus.
-- Register `dayjs` plugins once at app setup, not per component.
-
-### Data fetching
-
-- Include **every** result-affecting parameter in the query key (filters, pagination, customer id)
-  or you serve stale/cross-contaminated data.
-- **Server-side** pagination/filtering for large tables; never fetch-all-and-filter-client-side.
-- Invalidate precisely (affected resource/id) after mutations, not the whole cache.
-- **`client-event-listeners`** one shared global listener, not one per row.
-  **`client-passive-event-listeners`** `{passive:true}` for scroll/wheel/touch.
-- **`client-localstorage-schema`** version and minimize persisted data; read once into memory
-  (`js-cache-storage`), never in a render path.
-- Ignore/abort stale in-flight responses so a slow earlier one can't overwrite a newer one.
-
-### Re-renders
-
-- **`rerender-derived-state-no-effect`** derive during render; no `useEffect`+`setState` to compute.
-- **`rerender-no-inline-components`** never define a component inside a component — it remounts and
-  loses state every parent render. **Includes DataGrid `renderCell`/`slots`** — hoist or `useCallback`.
-  *(Live violation: `CreditProfileCard.tsx:52`.)*
-- **`rerender-functional-setstate`** `setX(prev=>…)` keeps callbacks stable.
-- **`rerender-defer-reads`** don't subscribe to state used only inside a callback.
-- **`rerender-derived-state`** subscribe to the derived boolean, not the churning raw value.
-- **`rerender-dependencies`** primitive deps, not freshly-built objects/arrays.
-- **`rerender-lazy-state-init`** `useState(() => expensive())`.
-- **`rerender-memo`** memoize genuinely expensive subtrees;
-  **`rerender-simple-expression-in-memo`** don't memo a primitive comparison.
-- **`rerender-memo-with-default-value`** hoist non-primitive defaults (`const EMPTY: readonly T[] = []`).
-- **`rerender-split-combined-hooks`**, **`rerender-move-effect-to-event`**,
-  **`rerender-transitions`** / **`rerender-use-deferred-value`** (responsive input over a big list),
-  **`rerender-use-ref-transient-values`** (scroll/drag values).
-
-### Rendering
-
-- **`rendering-conditional-render`** ternary, not `&&` — `{count && <X/>}` renders a literal `0`.
-- **Stable, data-derived `key`s** (`ticket.id`); never array index on reorderable/filterable rows.
-- **`rendering-hoist-jsx`** static JSX to module scope. **`rendering-content-visibility`** +
-  virtualization for long lists. **`rendering-usetransition-loading`**,
-  **`rendering-activity`** (keep expensive panels mounted over remount-per-tab),
-  **`rendering-animate-svg-wrapper`**, **`rendering-svg-precision`**,
-  **`rendering-resource-hints`**, **`rendering-script-defer-async`**.
-
-### JavaScript (lowest priority — never trade readability for these)
-
-- **`js-set-map-lookups`/`js-index-maps`** build a `Map` once instead of `.find()` in a loop
-  (the classic O(n²) in a table render).
-- **`js-combine-iterations`**, **`js-flatmap-filter`**, **`js-early-exit`**,
-  **`js-length-check-first`**, **`js-hoist-regexp`**, **`js-cache-property-access`**,
-  **`js-cache-function-results`**, **`js-min-max-loop`**,
-  **`js-tosorted-immutable`** (never mutate props/state in place), **`js-batch-dom-css`**,
-  **`js-request-idle-callback`**.
-
-## 9. Hooks Correctness
-
-- Rules of Hooks: top level only, never in conditions/loops/early returns.
-- **Complete dependency arrays.** Never silence the lint by deleting a dep — fix the design
-  (hoist, ref, functional update, stable callback).
-- **Effects synchronize with external systems** (subscriptions, listeners, imperative APIs) —
-  not for deriving data or reacting to your own `setState`.
-- **Always clean up**: listeners, timers, subscriptions, aborts. A missing cleanup is a leak
-  and a set-state-after-unmount warning.
-- **`advanced-use-latest`/`advanced-event-handler-refs`** stable callback identity without stale
-  closures. **`advanced-effect-event-deps`**, **`advanced-init-once`** (app init once per load).
-
-## 10. Security
-
-- **Never `dangerouslySetInnerHTML`** with server/user content. If unavoidable, sanitize
-  (DOMPurify) and justify in a comment. React escapes by default — don't defeat it.
-- **Client-side authorization is display logic, not enforcement.** Hiding a button is UX; the
-  backend must authorize every action. Never treat an RBAC check in the SPA as a control.
-- **No secrets in the frontend.** Anything in `import.meta.env` shipped to the browser is public —
-  no API keys or signing secrets. Only `VITE_`-prefixed public config.
-- Tokens: prefer httpOnly cookies; if `localStorage` is used, accept the XSS exposure, keep TTLs
-  short, and clear on logout. Never log or put a token in a URL/query param.
-- Validate and allow-list any URL used in `href`/`src`/redirect (block `javascript:`, open redirects);
-  `rel="noopener noreferrer"` on `target="_blank"`.
-- Never render raw backend errors/stack traces to users; no PII or tokens in `console`.
-
-## 11. Accessibility
-
-- Semantic elements first (`button`, `nav`, `table`); ARIA only to fill genuine gaps.
-- Every input has a **programmatically associated label**; errors linked via
-  `aria-describedby` + `aria-invalid` (not colour alone).
-- **Icon-only buttons need an accessible name** (`aria-label`).
-- Keyboard reachable and operable; visible focus — never remove outlines without a replacement.
-  Dialogs trap focus and restore it on close (MUI `Dialog` does this — don't fight it).
-- Contrast ≥ 4.5:1 for body text; don't encode status by colour alone (add text/icon) — matters
-  for status chips/badges anywhere in the UI.
-- Announce async results (toast/`role="status"`), so a screen-reader user learns the save succeeded.
-- Avoid `autoFocus` (jarring, disorienting) unless there's a strong, deliberate UX reason.
-
-## 12. Tooling Gates
-
-Run before calling work complete, from the app root:
+## 8. Gates — honest baseline
 
 ```bash
-npm run typecheck     # tsc --noEmit — must be clean
-npm run lint          # eslint src (--max-warnings 0)
-npm run build         # tsc && vite build — must succeed
-# npm test            # once Vitest is set up
+npm run lint       # oxlint — configless, currently CLEAN (zero findings)
+npm run build      # vite build — currently passes, ~609 kB / 178 kB gzipped
+npm run dev        # then click through the app
 ```
 
-**Honest baseline (measured, as configured):**
+- **The linter is `oxlint`, not ESLint.** There is no `eslint.config.js` and none is
+  needed — oxlint runs without configuration. `npm run lint` is a real gate and it is
+  currently green: **never leave it with a new finding.**
+- **There is no TypeScript and no `npm run typecheck`.**
+- **There is no test framework.** If adding one: Vitest + React Testing Library + MSW.
+  Priority order — `ComponentRenderer` against malformed payloads (the coercers are the
+  highest-value thing to test), `api.js` network-failure path, `ErrorBoundary` containment,
+  `formatCompact`/`formatFull` edges.
 
-- `npm run lint` → **237 problems (13 errors, 224 warnings)**: 78 `no-explicit-any`,
-  52 MUI barrel imports, 45 unused vars, 41 type-import style.
-- `npm run typecheck` / `npm run build` → **currently FAILING**. Most output is
-  `node_modules/@refinedev/*` and a missing `@types/qs`; the `src/` errors are all in
-  `ManagerSettingsPage.tsx` (`useFieldArray` not exported from the installed
-  `react-hook-form`, plus two implicit `any`s). Fix those before relying on build as a gate.
+`npm run build` succeeding means it compiled, **not** that it works. Run the app.
 
-This is pre-existing debt, not yours — but it means **"the build passes" is not currently a
-signal**. Verify your change with `npm run lint` on the files you touched and by running the app.
+## 9. AI agent rules
 
-- **Never introduce a new warning.** Leave files you touch at or below their previous count.
-- Don't "fix" the baseline wholesale in an unrelated change — that buries the real diff.
-- Never add `eslint-disable` without a reason comment; never disable a rule repo-wide to go green.
-- `--max-warnings 0` means the baseline currently fails; treat *your* files as the gate until
-  the debt is burned down.
+1. **Read `ComponentRenderer.jsx` first** — it defines what can be drawn.
+2. **Keep the catalog in sync with `backend/schemas.py`.** Two edits, always.
+3. **Never trust the payload.** New field reads go through the coercers.
+4. **Never remove an error-handling layer** (§2), and never render a raw error to a user.
+5. **Never hardcode a chart color or bypass `seriesColor()`.**
+6. Never mirror one piece of state into another; derive during render.
+7. No new dependency without asking — the dependency list is deliberately two entries long.
+8. **Run `npm run build` and actually load the app; report real output.** Do not claim a
+   lint, typecheck, or test that does not exist here.
+9. Keep the diff focused. No drive-by refactors, no reformatting untouched files, no
+   commits unless asked.
+10. Plain JSX. Do not introduce `.tsx` files piecemeal — converting the app to TypeScript
+    is a whole-project decision, not a side effect of another change.
 
-## 13. AI Agent Rules
+## 10. Review checklist
 
-1. **Read neighbouring code first** and match existing patterns. Repo convention beats this doc.
-2. **Follow the structure**: `pages/<feature>/` + `components/`, hooks for logic, `interfaces/` for
-   shared types. Don't invent a parallel tree.
-3. **Don't grow the known-oversized files** (§2) — extract the part you touch.
-4. **No new `any`**, no `@ts-ignore`, no new lint warnings.
-5. **Server state via Refine hooks**; URL state via `useSearchParams`. Never mirror server data
-   into `useState`.
-6. **Every async path gets loading, empty, and error states.** Every mutation handles failure.
-7. **Never invent business rules** — credit limits, tax, rounding, status transitions, SLAs. Ask.
-8. **Never guess at money or date semantics.** INR formatting via the shared helper; UTC↔local
-   explicitly at the boundary.
-9. **State assumptions** in your response when proceeding under ambiguity.
-10. **Keep the diff focused** — no drive-by refactors or reformatting untouched files.
-11. **Run the gates and report real output.** Never claim a typecheck/lint/test you didn't run.
-    Say so plainly if one fails.
-12. **Flag security-relevant changes** (auth, RBAC display, tokens, `dangerouslySetInnerHTML`,
-    URL handling) in your summary.
-13. **No commits unless asked.**
+**Renderer** — whitelist dispatch intact (`hasOwnProperty`, not a bare index)? new field
+reads coerced? renderer returns `<EmptyState/>` instead of throwing on empty? new type
+registered in both `RENDERERS` and, if wide, `WIDE_TYPES`?
 
-## 14. Review Checklist
+**Errors** — every card still inside an `<ErrorBoundary>`? `api.js` still resolving rather
+than throwing? any raw error message, stack, or backend exception text rendered to the
+user? empty `catch`? loading/empty/error all present?
 
-Flag real defects only; cite `file:line` and the user-visible consequence.
+**State** — server payload mirrored into a second state? `useEffect` computing what render
+could? stale-response guard present on the fetch? identifier named `data`/`tmp`/`item`?
 
-**Architecture** — file over 250 lines or component over ~120? logic that belongs in a hook sitting
-in JSX? component defined inside a component? prop-drilling past 2 levels? duplication that should
-be extracted, or premature abstraction that shouldn't?
+**Charts** — hardcoded hex instead of `seriesColor()`? more than 4 series or 6 slices?
+dual axis? legend missing with ≥ 2 series? limits still matching the backend's?
 
-**Naming** — domain-accurate, not `data`/`tmp`/`item`? `handle*`/`on*` split right? booleans
-`is/has/can`? units in the name? magic numbers/strings replaced by named constants?
+**Components** — component defined inside a component? file over 250 lines? `&&` with a
+numeric left side? array index as `key` outside the static table body?
 
-**State** — server data mirrored into `useState`? filters/pagination/tab in component state instead
-of the URL? two states that can disagree? `useEffect`+`setState` deriving what render could compute?
-context value unmemoized or over-broad?
+**A11y** — icon-only button without a name? input without a label? status by color alone?
+focus outline removed?
 
-**Types** — new `any`/`@ts-ignore`? API response typed at the boundary? optional-flag soup where a
-discriminated union belongs? `tsc` clean?
-
-**Errors** — error boundary covering this subtree? mutation failure surfaced and input preserved?
-empty `catch`? 401/403/422/5xx distinguished? non-idempotent write auto-retried? loading/empty/error
-all present? PII or tokens logged?
-
-**Forms** — schema validation? submit disabled while submitting (double-post risk)? server field
-errors mapped back? `watch()` on the whole form? dirty-navigation guard? money precision and
-timezone handled explicitly?
-
-**Testing** — new logic covered incl. error/empty/permission paths? behaviour not implementation?
-deterministic (no real clock/network)? regression test for a bug fix?
-
-**Performance** — sequential awaits that could be parallel? `await` in a loop? MUI barrel import?
-heavy component not lazy? query key missing a parameter? unbounded list fetch? `.find()` in a
-render loop? array index as `key`? `&&` with a numeric left side?
-
-**Hooks** — conditional hook? dep array incomplete or suppressed? missing cleanup?
-
-**Security** — `dangerouslySetInnerHTML`? client-side RBAC treated as enforcement? secret in
-`import.meta.env`? unvalidated URL/redirect? missing `noopener`? raw backend error shown to user?
-
-**A11y** — inputs labelled and errors associated? icon-only button named? keyboard reachable, focus
-visible? status conveyed by colour alone? `autoFocus` added?
-
-**Gates** — typecheck, lint, build green; no new warnings in touched files; no unexplained
-`eslint-disable`.
+**Gates** — `npm run build` actually run and reported? no claim of lint/typecheck/tests,
+which do not exist in this project?

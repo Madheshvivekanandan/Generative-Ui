@@ -11,11 +11,11 @@ import { formatFull } from './lib/format'
  * chooses from. Nothing here is special-cased -- if a component renders on
  * load, the model can produce it too.
  */
-function baselineComponents(data) {
-  if (!data) return { cards: [], charts: [] }
+function baselineComponents(dataset) {
+  if (!dataset) return { cards: [], charts: [] }
 
-  const monthly = Array.isArray(data.monthly) ? data.monthly : []
-  const kpis = Array.isArray(data.kpis) ? data.kpis : []
+  const monthly = Array.isArray(dataset.monthly) ? dataset.monthly : []
+  const kpis = Array.isArray(dataset.kpis) ? dataset.kpis : []
 
   const cards = kpis.map((kpi) => ({
     type: 'stat_card',
@@ -61,7 +61,7 @@ function baselineComponents(data) {
       series: [
         {
           name: 'Expenses',
-          points: (data.expenses_by_category || []).map((row) => ({
+          points: (dataset.expenses_by_category || []).map((row) => ({
             x: row.category,
             y: row.amount,
           })),
@@ -72,7 +72,7 @@ function baselineComponents(data) {
       type: 'donut_chart',
       title: 'Revenue by Product Line',
       unit: 'USD',
-      slices: (data.revenue_by_product || []).map((row) => ({
+      slices: (dataset.revenue_by_product || []).map((row) => ({
         label: row.product,
         value: row.amount,
       })),
@@ -87,7 +87,7 @@ function baselineComponents(data) {
         { key: 'amount', label: 'Amount', align: 'right' },
         { key: 'status', label: 'Status', align: 'left' },
       ],
-      rows: (data.transactions || []).map((row) => [
+      rows: (dataset.transactions || []).map((row) => [
         row.date,
         row.description,
         row.category,
@@ -101,7 +101,7 @@ function baselineComponents(data) {
 }
 
 export default function App() {
-  const [data, setData] = useState(null)
+  const [dashboard, setDashboard] = useState(null)
   const [loadError, setLoadError] = useState(null)
   const [generated, setGenerated] = useState([])
   const [messages, setMessages] = useState([])
@@ -112,7 +112,7 @@ export default function App() {
     let cancelled = false
     fetchDashboard()
       .then((payload) => {
-        if (!cancelled) setData(payload)
+        if (!cancelled) setDashboard(payload)
       })
       .catch((error) => {
         if (!cancelled) setLoadError(error.message)
@@ -122,7 +122,7 @@ export default function App() {
     }
   }, [])
 
-  const baseline = useMemo(() => baselineComponents(data), [data])
+  const baseline = useMemo(() => baselineComponents(dashboard), [dashboard])
 
   const send = useCallback(
     async (text) => {
@@ -163,9 +163,9 @@ export default function App() {
             <div>
               <h1>Acme Analytics — Finance</h1>
               <p>
-                {data
-                  ? `${data.period?.start} to ${data.period?.end} · all amounts in ${
-                      data.currency || 'USD'
+                {dashboard
+                  ? `${dashboard.period?.start} to ${dashboard.period?.end} · all amounts in ${
+                      dashboard.currency || 'USD'
                     }`
                   : 'Loading…'}
               </p>
@@ -196,7 +196,7 @@ export default function App() {
             </>
           ) : null}
 
-          {data ? (
+          {dashboard ? (
             <>
               <div className="section-label">Overview</div>
               <div className="grid grid-kpi">
