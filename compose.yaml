@@ -1,0 +1,30 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      # Compose substitutes these from the .env file next to this compose file.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # nginx proxies /api, so the browser only ever makes same-origin
+      # requests. This is here for anyone hitting the backend port directly.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    # Exposed for curl and /docs; the frontend does not use it.
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # The image has no curl, and adding one just for this is not worth a layer.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
