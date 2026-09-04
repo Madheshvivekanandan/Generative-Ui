@@ -13,22 +13,35 @@ existing code, follow the code and say so.**
 
 ```
 backend/
-  main.py        # thin routes + SSE framing; the canvas surface id
-  agent.py       # the streaming loop: optimistic + authoritative passes, prompts, fallbacks
-  a2ui.py        # A2UI v0.9 wire format: builders, sanitize(), block -> A2UI compiler
-  schemas.py     # BOTH CONTRACTS — the LLM block catalog and the HTTP request/read models
-  session.py     # per-session rolling transcript (in-memory, thread-locked LRU)
-  baseline.py    # the load-time dashboard, built from the same blocks + compiler
-  mock_data.py   # the fixed dataset + its plain-text rendering for the prompt
-  tests/         # pure-function tests: sanitizer, compiler, follow-ups, session window
-  pyproject.toml # tool config (pytest pythonpath, ruff); deps mirrored in requirements.txt
+  main.py            # app assembly only: env, logging, CORS, include routers
+  api/               # HTTP layer: health.py, dashboard.py, generate.py (one router each)
+    streams.py       #   SSE framing + the per-turn stream; CANVAS_SURFACE lives here
+  agent/             # the streaming loop, one concern per module:
+    runner.py        #   optimistic + authoritative passes (run, _generate)
+    prompts.py       #   SYSTEM_PROMPT (built once at import, on purpose)
+    fallbacks.py     #   FALLBACK_COPY + fallback()
+    emit.py  follow_ups.py  events.py  config.py
+  a2ui/              # A2UI v0.9 wire format:
+    messages.py      #   envelope builders + bind()
+    sanitizer.py     #   sanitize() + text_note()
+    compiler.py      #   _VIEW, compile_block, group_children, component_tree, full_surface
+    constants.py     #   VERSION, CATALOG_ID, REFINE_ACTION, MAX_*
+  schemas/           # ONE Pydantic model PER FILE; __init__.py re-exports them all
+  session.py         # per-session rolling transcript (one class: SessionStore)
+  baseline.py        # the load-time dashboard, built from the same blocks + compiler
+  mock_data.py       # the fixed dataset + its plain-text rendering for the prompt
+  tests/             # pure-function tests: sanitizer, compiler, follow-ups, session window
+  pyproject.toml     # tool config (pytest pythonpath, ruff); deps mirrored in requirements.txt
   requirements.txt  .env.example  Dockerfile  .dockerignore
 ```
 
-Imports point one way — `main → agent → a2ui → schemas`, with `session`, `baseline` and
-`mock_data` as leaves. The flat layout is deliberate and documented in the README;
-**do not add packages, routers/ or service layers without being asked.** Restructure the
-day a second route family, real persistence, or a ~500-line module arrives — not before.
+**House rules for structure:** one class per file (the owner's standard — see
+`schemas/`), one concern per module, and every package `__init__.py` re-exports its
+public names so callers write `import a2ui` / `from schemas import LineChart` without
+caring which file something lives in. Imports point one way — `main → api → agent →
+a2ui → schemas`, with `session`, `baseline` and `mock_data` as leaves. Keep new files
+small and focused; do not add service layers, repositories, or persistence without
+being asked.
 
 Deliberately absent — **do not add these without being asked**:
 
