@@ -1,6 +1,6 @@
 ---
 name: python-best-practices
-description: Python standard for the Gen_Ui generative-UI backend — a single-module FastAPI service that turns a free-text message into one LLM-chosen, schema-validated dashboard component. Load BEFORE writing, modifying, or reviewing any Python in this repo (backend/main.py, backend/schemas.py, backend/mock_data.py, or any new .py file). Covers the component-catalog contract, structured-output calls, the never-500 fallback rule, error/secret hygiene, naming, typing, logging, Docker, and a review checklist.
+description: Python standard for the Gen_Ui generative-UI backend — a flat FastAPI service that streams LLM-planned dashboard blocks to the browser as A2UI v0.9 messages over SSE. Load BEFORE writing, modifying, or reviewing any Python in this repo (backend/main.py, agent.py, a2ui.py, schemas.py, session.py, baseline.py, mock_data.py, or any new .py file). Covers the two-contract design (typed blocks vs A2UI wire), the streaming double-pass, sanitize(), the never-error stream rule, error/secret hygiene, naming, typing, logging, tests, and a review checklist.
 ---
 
 # Python Best Practices — Gen_Ui backend
@@ -13,100 +13,129 @@ existing code, follow the code and say so.**
 
 ```
 backend/
-  main.py        # FastAPI app: routes, the OpenAI call, sanitize(), fallbacks
-  schemas.py     # THE COMPONENT CATALOG — Pydantic models, both contract directions
+  main.py        # thin routes + SSE framing; the canvas surface id
+  agent.py       # the streaming loop: optimistic + authoritative passes, prompts, fallbacks
+  a2ui.py        # A2UI v0.9 wire format: builders, sanitize(), block -> A2UI compiler
+  schemas.py     # BOTH CONTRACTS — the LLM block catalog and the HTTP request/read models
+  session.py     # per-session rolling transcript (in-memory, thread-locked LRU)
+  baseline.py    # the load-time dashboard, built from the same blocks + compiler
   mock_data.py   # the fixed dataset + its plain-text rendering for the prompt
+  tests/         # pure-function tests: sanitizer, compiler, follow-ups, session window
+  pyproject.toml # tool config (pytest pythonpath, ruff); deps mirrored in requirements.txt
   requirements.txt  .env.example  Dockerfile  .dockerignore
 ```
+
+Imports point one way — `main → agent → a2ui → schemas`, with `session`, `baseline` and
+`mock_data` as leaves. The flat layout is deliberate and documented in the README;
+**do not add packages, routers/ or service layers without being asked.** Restructure the
+day a second route family, real persistence, or a ~500-line module arrives — not before.
 
 Deliberately absent — **do not add these without being asked**:
 
 | Not here | Why |
 |---|---|
-| Database, SQLAlchemy, Alembic | No persistence. Generated cards live in React state and die on reload. |
-| Repository / service layers | Three modules total. A service layer over one OpenAI call is ceremony. |
-| Auth, sessions, users | Single-user local experiment. |
-| `async def` routes | The OpenAI SDK call is blocking; plain `def` lets FastAPI use its threadpool. **Do not convert routes to `async def` while the client is synchronous** — it would stall the event loop. |
-| Streaming responses | The frontend renders one component per request, atomically. |
+| Database, SQLAlchemy, Alembic | No persistence. Sessions are an in-memory LRU; a restart is a fresh conversation. |
+| Repository / service layers | Seven small modules with a linear import graph ARE the structure. |
+| Auth, users | Single-user demo. |
+| `async def` routes | The OpenAI SDK call is blocking; plain `def` handlers return sync generators that Starlette iterates in its threadpool. **Do not convert routes to `async def` while the client is synchronous.** |
 
-Runtime is whatever `python:3.12-slim` ships (the Docker image) and 3.14 locally. Use
-`X | None`, `list[str]`, `Literal`, and the `|` union operator. Dependencies are
-range-pinned in `requirements.txt`; **`openai` is held at `<2`** because the code calls
-`client.beta.chat.completions.parse`.
+Runtime is `python:3.12-slim` in Docker and 3.14 locally. Use `X | None`, `list[str]`,
+`Literal`, and the `|` union operator. Dependencies are range-pinned in
+`requirements.txt` (mirrored in `pyproject.toml` — change both together); **`openai` is
+held at `<2`** because the code uses `client.beta.chat.completions.stream`.
 
 ## 1. The two contracts that define this service
 
 Everything else is detail. Get these wrong and nothing works.
 
-### Contract A — `schemas.py` is the component catalog, in both directions
+### Contract A — two schemas, on purpose
 
-The Pydantic models are simultaneously:
+`schemas.py` carries the **block catalog**: Pydantic models that are simultaneously
 
 1. the JSON Schema handed to OpenAI as `response_format`, which **constrains what the
    model can emit** (constrained decoding, not instruction-following), and
-2. the validator the response is parsed back through before it is serialized.
+2. the validator every parsed block passes before it is compiled.
 
-Consequences, all enforced in review:
+The model never speaks A2UI. `a2ui.py` compiles validated blocks into genuine A2UI v0.9
+messages (`createSurface`, `updateDataModel`, `updateComponents`); nothing downstream of
+that module knows about block types. Consequences, all enforced in review:
 
-- **`Component` is a bare union of `Literal`-tagged models.** Do not add a Pydantic
+- **`Block` is a bare union of `Literal`-tagged models.** Do not add a Pydantic
   `Field(discriminator=...)` — that emits a `discriminator` keyword OpenAI's strict schema
   mode rejects. The `Literal["line_chart"]` tag on each member is what does the work.
-- **Every field needs a `description`.** It is prompt text; the model reads it. A field
-  named `unit` with no description gets filled with garbage.
+- **Every catalog field needs a `description`.** It is prompt text; the model reads it.
 - **Avoid `Optional`/defaults inside catalog models.** Strict mode marks every property
-  required; a nullable field just makes the model emit `null` and pushes the problem to
-  the renderer. Prefer a required field with a documented "0 if unknown" convention.
-- **Adding a component type is exactly two edits**: a model here, and a renderer
-  registered in the frontend's `RENDERERS` map. If a change needs more, it is wrong.
+  required; prefer a required field with a documented "0 if unknown" convention.
+- **Adding a block type is exactly three edits**: a model in `schemas.py`, a row in
+  `_VIEW` in `a2ui.py`, and a component registered in the frontend catalog. If a change
+  needs more, it is wrong.
+- Structured outputs guarantee **types and required props, not counts** — "1–4 blocks"
+  and "exactly 3 follow-ups" are enforced post-hoc (`blocks[:MAX_BLOCKS]`,
+  `clean_follow_ups`). Don't claim the schema enforces them.
 
-### Contract B — `/api/generate` never fails
+### Contract B — the stream never errors
 
-The endpoint returns **HTTP 200 with a valid `Component` on every path** — missing key,
-network error, refusal, validation failure, unusable output. The frontend has one happy
-path by design; a 500 would leave it with nothing to render.
+`/api/generate` and `/api/action` return an SSE stream that **never carries an error
+status**. Every failure — missing key, upstream error, refusal, validation failure,
+all-blocks-unusable — resolves to a `text_note` block with `fallback: true`, emitted
+through the same `_emit_blocks` path as real content.
 
-- Every `except` branch returns a `GenerateResponse` with `fallback=True`, a `text_note`
-  component, and `DEFAULT_FOLLOW_UPS`.
-- **This is a deliberate deviation** from the usual "log and re-raise at the boundary"
-  rule. It is the product requirement. Keep it, and keep the `logger.exception` call —
-  swallowing without logging is not the same thing.
-- Request-shape errors are the exception: `GenerateRequest` validation still yields 422,
-  because a malformed request is a client bug, not a model failure.
+- All failure copy lives in `FALLBACK_COPY`, keyed by a `Literal` ErrorCode. Generic
+  prose only (see §3).
+- **This is a deliberate deviation** from "log and re-raise at the boundary". It is the
+  product requirement. Keep it, and keep the `logger.exception` call.
+- Request-shape errors are the exception: Pydantic validation still yields 422, because a
+  malformed request is a client bug, not a model failure.
+
+### The streaming double-pass (do not collapse it)
+
+`agent.run()` streams every turn **twice**: optimistically from partial-parse snapshots
+(a block is only provably finished once the next one has started — the N−1 rule), then
+authoritatively once the stream closes, re-sending the full validated data model and
+tree. Replace-wins is what makes the optimistic pass safe. Both passes go through
+`sanitize()`; do not "optimize away" either one. Every turn re-composes the single
+canvas surface (`CANVAS_SURFACE`), and the client clears it first — see the README's
+"One canvas, on purpose".
 
 ## 2. `sanitize()` — shape is not sense
 
 Structured outputs guarantee the *shape*. They cannot guarantee four series instead of
-nine, a donut with more than one slice, or a table row whose cell count matches its
-columns. `sanitize()` is the layer that enforces meaning:
+nine, a donut with more than one positive slice, or a table row whose cell count matches
+its columns. `sanitize()` in `a2ui.py` enforces meaning:
 
-- **Trim what is trimmable** (`MAX_SERIES`, `MAX_POINTS`, `MAX_SLICES`, `MAX_ROWS`),
-  **raise `ValueError` on what is not.** The caller converts that to a fallback.
+- **Trim what is trimmable** (`MAX_SERIES`, `MAX_POINTS`, `MAX_SLICES`, `MAX_ROWS`,
+  `MAX_ACTIONS`), **raise `ValueError` on what is not.** The caller drops that one block
+  and keeps the turn.
 - Every limit is a module-level `UPPER_SNAKE` constant, and the same numbers appear in
-  `SYSTEM_PROMPT`. **Change both together** or the prompt starts lying to the model.
+  `SYSTEM_PROMPT` (which interpolates them). **Change both together** or the prompt
+  starts lying to the model.
 - Keep it pure and synchronous — no I/O, no logging of user content.
 
 ## 3. Secrets and error hygiene (the rule most easily broken here)
 
-- **Never put an exception message in an API response.** `GenerateResponse.error` is a
-  `Literal` code (`upstream_error`, `missing_api_key`, …), never `str(exc)`. An OpenAI
-  `AuthenticationError` string contains a partial API key, and this response is rendered
-  verbatim in the browser. Details go to `logger.exception`, which is not user-visible.
-- Same rule for `text_note` bodies on fallback paths: generic prose, no `{exc}`.
-- `OPENAI_API_KEY` comes from the environment only. **Never** a default, a literal, a test
-  fixture, or a comment. `.env` is gitignored; every new variable is documented in
+- **Never put an exception message in anything user-visible.** Fallback copy is generic
+  prose keyed by a `Literal` code — never `str(exc)`. An OpenAI `AuthenticationError`
+  string contains a partial API key, and fallback bodies render verbatim in the browser.
+  Details go to `logger.exception`, which is not user-visible. This repo's first
+  security fix was exactly this leak; the regression test asserts no fallback body
+  carries exception text.
+- `OPENAI_API_KEY` comes from the environment only. **Never** a default, a literal, a
+  test fixture, or a comment. `.env` is gitignored; every new variable is documented in
   `backend/.env.example` **and** `compose.yaml` in the same change.
 - CORS stays an explicit allow-list from `ALLOWED_ORIGINS`. Never `["*"]`.
-- User message text is bounded (`max_length=2000`) and `extra="forbid"` on request models.
+- User message text is bounded (`max_length=2000`) and `extra="forbid"` on request
+  models. Action context values re-enter generation as user text — bound them the same
+  way.
 
 ## 4. Naming, typing, functions
 
 | Kind | Convention | Here |
 |---|---|---|
 | Module | `snake_case`, singular | `mock_data.py` |
-| Class | `PascalCase` noun | `DonutChart`, `GenerateResponse` |
-| Function | `snake_case` verb phrase | `clean_follow_ups()`, `dataset_for_prompt()` |
-| Constant | `UPPER_SNAKE`, module top | `MAX_SLICES`, `DEFAULT_FOLLOW_UPS` |
-| Private | leading `_` | `_client` |
+| Class | `PascalCase` noun | `DonutChart`, `SessionStore` |
+| Function | `snake_case` verb phrase | `clean_follow_ups()`, `compile_block()` |
+| Constant | `UPPER_SNAKE`, module top | `MAX_SLICES`, `CANVAS_SURFACE` |
+| Private | leading `_` | `_emit_blocks` |
 
 - **Type-hint every parameter and return**, including `-> None`. Modern syntax only:
   `list[str]`, `str | None`, `A | B`. Not `List`, `Optional`, `Union[...]`.
@@ -116,102 +145,103 @@ columns. `sanitize()` is the layer that enforces meaning:
 
 ## 5. Errors, logging, imports
 
-- Catch the **narrowest** type. `except Exception` only at the endpoint boundary, and it
-  must `logger.exception(...)`.
+- Catch the **narrowest** type. `except Exception` only at the generation boundary in
+  `agent.run()`, and it must `logger.exception(...)` and yield a fallback.
 - No bare `except`, no `except: pass`. Chain with `from exc` when re-raising.
 - One module logger: `logger = logging.getLogger("genui")`. **No `print()`.**
 - **Lazy `%s` formatting in log calls**, never f-strings: `logger.warning("bad: %s", exc)`.
 - Absolute imports, stdlib → third-party → local, one per line. No wildcards.
-- Import-time work is confined to `main.py` (`load_dotenv()`, `SYSTEM_PROMPT`). The prompt
-  is built once at import **on purpose** — it embeds the whole dataset and should not be
-  re-rendered per request. Do not add import-time side effects to `schemas.py` or
-  `mock_data.py`; they must stay importable in a test with no environment.
+- Import-time work is confined to `main.py` (`load_dotenv()`) and `agent.py`
+  (`SYSTEM_PROMPT`, built once **on purpose** — it embeds the whole dataset and should
+  not be re-rendered per request). `schemas.py`, `a2ui.py`, `session.py` and
+  `mock_data.py` must stay importable in a test with no environment.
 
 ## 6. FastAPI
 
-- **`response_model` on every route.** `/api/dashboard` returns `DashboardResponse`, which
-  doubles as validation of the mock fixtures.
-- Thin handlers: validate, call, return. Business logic lives in module functions.
+- **`response_model` on every non-streaming route.** Streaming routes return
+  `StreamingResponse` with `media_type="text/event-stream"` and must send
+  `X-Accel-Buffering: no` (nginx's `proxy_buffering off` is the other half — the
+  belt-and-brace pair that keeps the progressive render alive).
+- Thin handlers: validate, call, return. The streaming logic lives in `agent.py`.
 - `summary=` on routes so `/docs` is usable.
 - Plain `def` handlers — see §0.
-- The API is unversioned (`/api/...`, no `/v1`) because nginx and the frontend proxy on
-  that prefix and there is exactly one client. If a second client ever appears, version it
-  then.
+- The API is unversioned (`/api/...`) because there is exactly one client. Version it
+  when a second appears.
 
-## 7. Testing — **current state: none**
+## 7. Testing
 
-There is no pytest, no config, no coverage. **Do not claim tests were run.** When adding
-them:
+`backend/tests/` covers the pure functions — that is where the bugs are:
 
-- `backend/tests/`, `test_<module>.py`, `test_<unit>_<scenario>_<expected>()`.
-- **Never call the real OpenAI API in a test.** Stub `ask_model` or the client; assert on
-  `sanitize()` and `clean_follow_ups()` directly — they are pure and are where the bugs are.
-- Priority order: `sanitize()` edge cases (nine series, one-slice donut, ragged table rows,
-  empty series) → every fallback branch of `generate` → `clean_follow_ups` de-duplication →
-  `DashboardResponse` accepting the fixtures.
-- Assert that **no fallback response body contains an exception string** — that is the
-  regression test for the leak fixed in this repo.
-- `TestClient` for routes; deterministic, no network, no sleeps.
+- `test_a2ui.py`: `sanitize()` edges (trims, one-slice donut, ragged rows, empty series
+  raise), `group_children` row packing, `compile_block` bindings and the refine-action
+  context, `full_surface` ordering (data before components).
+- `test_agent.py`: `clean_follow_ups` (echo drop, casefold dedupe, length cap).
+- `test_session.py`: pair-trimmed window, oldest-first eviction, history-returns-a-copy.
+
+Rules: **never call the real OpenAI API in a test** — the streaming loop is exercised by
+running the app, not by mocking the SDK's event objects. `python -m pytest` from
+`backend/` (pythonpath is configured in `pyproject.toml`). Deterministic, no network, no
+sleeps. New pure logic ships with tests; a bug fix ships a failing-then-passing test.
 
 ## 8. Gates — honest baseline
 
-**Nothing is configured.** There is no `pyproject.toml`, no ruff, black, mypy, or pytest.
-`requirements.txt` is range-pinned, not a lockfile. Today the only real verification is
-running the app and hitting the endpoints.
-
-If you add tooling, this is the target:
-
 ```bash
-ruff format backend && ruff check --fix backend
-mypy backend
-pytest backend -q
+cd backend
+python -m pytest -q        # 22 tests, all pure -- must stay green
+ruff check .               # config in pyproject.toml (if ruff is installed)
 ```
 
-Until then: **run the service and exercise the endpoint you changed, and report the actual
-output.** Never claim a gate you did not run.
+There is no mypy gate and no coverage target yet. `requirements.txt` is range-pinned,
+not a lockfile. Beyond the tests, the real verification is running the app and hitting
+the endpoints — **exercise the endpoint you changed and report the actual output.**
+Never claim a gate you did not run.
 
 ## 9. AI agent rules
 
-1. **Read `schemas.py` first.** It defines what the model can say and what the frontend can
-   draw. Most changes start there.
-2. **Keep the catalog and the renderer in sync.** A new component model without a frontend
-   renderer produces an "Unsupported component" card.
+1. **Read `schemas.py` first, then `a2ui.py`.** The block catalog defines what the model
+   can say; the compiler defines what the browser receives.
+2. **Keep the three-edit rule** (§1A): schema model + `_VIEW` row + frontend catalog
+   component, always together.
 3. **Keep prompt constants and code constants in sync** (§2).
 4. **Never widen what reaches the client.** No exception text, no key material, no stack
-   traces in a response body (§3).
-5. **Preserve the never-500 contract.** A new failure mode needs a new fallback branch, not
-   a raised exception.
-6. Type-hint everything; no `Any` without a justifying comment.
-7. Never hardcode secrets, model names, or endpoints — environment plus a documented
+   traces in any emitted payload (§3).
+5. **Preserve the never-error stream.** A new failure mode needs a new ErrorCode +
+   `FALLBACK_COPY` entry, not a raised exception.
+6. **Do not collapse the two streaming passes**, and do not emit the last block of a
+   partial snapshot (the N−1 rule exists because that block may still be growing).
+7. Type-hint everything; no `Any` without a justifying comment.
+8. Never hardcode secrets, model names, or endpoints — environment plus a documented
    default, added to `.env.example` and `compose.yaml` together.
-8. Do not add dependencies, layers, async, or a database without asking. The value of this
-   codebase is that it is small.
-9. **Run what you changed and report real output.** Say plainly when something failed.
-10. Keep the diff focused. No drive-by refactors, no commits unless asked.
+9. Do not add dependencies, layers, async, or a database without asking. The value of
+   this codebase is that it is small.
+10. **Run the tests and what you changed; report real output.** Keep the diff focused;
+    no commits unless asked.
 
 ## 10. Review checklist
 
-**Catalog** — new component has a `Literal` type tag, a description on every field, and a
-matching frontend renderer? Discriminator keyword accidentally introduced? Union still
-converts to a valid strict schema (`to_strict_json_schema` returns the expected variant
-count)?
+**Catalog** — new block has a `Literal` type tag, a description on every field, a `_VIEW`
+row, and a frontend component? Discriminator keyword accidentally introduced? Counts
+claimed as schema-enforced when they are post-hoc?
 
-**Fallback contract** — every new `except` returns a valid `GenerateResponse` with
-`fallback=True`? Any path that can now raise out of `generate`?
+**Stream contract** — every new failure path resolves to a fallback block through
+`_emit_blocks`? Anything that can now raise out of `agent.run()`? Both passes still go
+through `sanitize()`?
 
-**Secrets & errors** — any `str(exc)`, `{exc}`, or `repr` of an upstream error in a
-response body or `text_note`? Key material in a log line that is also user-visible? New
-env var missing from `.env.example` or `compose.yaml`? CORS still an allow-list?
+**Secrets & errors** — any `str(exc)`, `{exc}`, or upstream text in an emitted payload?
+New env var missing from `.env.example` or `compose.yaml`? CORS still an allow-list?
+Action context still bounded?
 
 **Sanitize** — limits enforced as constants, mirrored in the prompt? Unusable output
-raising rather than shipping a broken card?
+raising rather than shipping a broken block?
 
 **Typing** — full annotations, modern syntax, no `Optional`/`Union[...]`/`Any`?
 
 **Logging** — lazy `%s`, no f-strings, no `print`, `logger.exception` on the boundary
 catch, no user content or secrets logged?
 
-**FastAPI** — `response_model` present? handler thin? still plain `def`?
+**FastAPI** — streaming route still plain `def` returning a sync generator?
+`X-Accel-Buffering: no` intact? handler thin?
 
-**Docs** — docstring says *why*, not what the signature already says? README updated for
-new setup steps or variables?
+**Tests** — pure-function changes covered? tests deterministic, no network?
+
+**Docs** — docstring says *why*? README updated for new setup steps or variables?
