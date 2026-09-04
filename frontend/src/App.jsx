@@ -11,7 +11,14 @@ import ErrorBoundary from './components/ErrorBoundary'
 import { financeCatalog } from './a2ui/catalog'
 import { fetchBaseline, streamTurn } from './a2ui/transport'
 
-const BASELINE_SURFACE = 'dashboard'
+/**
+ * The one surface everything renders into -- the baseline at load, every
+ * generated answer after it. Must match `CANVAS_SURFACE` in `backend/main.py`.
+ * A fixed id is what makes the dashboard re-compose in place: `send` deletes
+ * it, the incoming stream's `createSurface` re-opens the same id at the same
+ * position, and replace-wins semantics do the rest.
+ */
+const CANVAS_SURFACE = 'dashboard'
 
 /** One id per browser tab, so two tabs are two conversations. */
 function newSessionId() {
@@ -31,8 +38,9 @@ export default function App() {
   const nextId = useRef(1)
 
   const [loadError, setLoadError] = useState(null)
-  const [generatedIds, setGeneratedIds] = useState([])
-  const [prompts, setPrompts] = useState({})
+  // The request whose answer the canvas currently shows; null means the
+  // baseline overview. Chrome, not a component -- it never enters the surface.
+  const [canvasPrompt, setCanvasPrompt] = useState(null)
   const [messages, setMessages] = useState([])
   const [busy, setBusy] = useState(false)
 
@@ -43,8 +51,13 @@ export default function App() {
   const [surfaceMap, setSurfaceMap] = useState(() => new Map())
 
   // `send` and the processor's action handler each need the other, so the
-  // handler reads through a ref that is filled in once `send` exists.
+  // handler reads through a ref that is filled in once `send` exists. `busy`
+  // is mirrored into a ref for the same reason -- and the guard matters more
+  // now than it did: with a single canvas, a button press mid-stream would put
+  // two writers on the same surface.
   const sendRef = useRef(null)
+  const busyRef = useRef(false)
+  busyRef.current = busy
 
   const processor = useMemo(
     () =>
@@ -52,6 +65,7 @@ export default function App() {
         // The client-to-server half of A2UI. The agent put the request it
         // wants back into the action context, so every button -- whatever the
         // model invented -- comes through this one path.
+        if (busyRef.current) return
         sendRef.current?.(action.context?.label || action.context?.prompt || 'Refine this', {
           url: '/api/action',
           body: {
@@ -94,8 +108,21 @@ export default function App() {
   }, [processor])
 
   /**
+   * Clear the canvas through the protocol, so the processor's state and ours
+   * cannot drift apart. The delete has to precede the stream: `createSurface`
+   * on a live surface keeps its existing components, so stale cards from the
+   * previous answer could leak into the new one wherever ids don't collide.
+   */
+  const clearCanvas = useCallback(() => {
+    if (processor.model.surfacesMap.has(CANVAS_SURFACE)) {
+      processor.processMessages([{ version: 'v0.9', deleteSurface: { surfaceId: CANVAS_SURFACE } }])
+    }
+  }, [processor])
+
+  /**
    * Run one turn. `text` is what goes in the chat log; `request` is where to
-   * send it, which differs for a typed message and a button press.
+   * send it, which differs for a typed message and a button press. The answer
+   * re-composes the canvas in place -- it does not stack under the last one.
    */
   const send = useCallback(
     async (text, request) => {
@@ -104,16 +131,13 @@ export default function App() {
 
       setMessages((prev) => [...prev, { id: nextId.current++, role: 'user', text }])
       setBusy(true)
-
-      let surfaceId = null
+      clearCanvas()
+      setCanvasPrompt(text)
 
       await streamTurn(url, body, {
-        onOpen: ({ surface_id: id }) => {
-          surfaceId = id
-          // Registered before any component arrives so the card's slot exists
-          // while it is still filling in, rather than appearing at the end.
-          setGeneratedIds((prev) => [id, ...prev])
-          setPrompts((prev) => ({ ...prev, [id]: text }))
+        onOpen: () => {
+          // The turn always re-composes the canvas; the id in the frame is
+          // announced for non-browser clients and needs nothing from us here.
         },
         onMessage: (message) => {
           try {
@@ -141,42 +165,38 @@ export default function App() {
             ...prev,
             { id: nextId.current++, role: 'assistant', text: detail, error: true, followUps: [] },
           ])
-          // Nothing will ever render into this surface, so don't leave an
-          // empty frame behind.
-          if (surfaceId) {
-            setGeneratedIds((prev) => prev.filter((id) => id !== surfaceId))
-          }
+          // The transport died with the canvas already cleared. The backend
+          // cannot report this one, so restore the baseline rather than
+          // leaving an empty dashboard behind.
+          fetchBaseline()
+            .then(({ messages: batch }) => {
+              clearCanvas()
+              processor.processMessages(batch)
+              setCanvasPrompt(null)
+            })
+            .catch(() => setLoadError('The dashboard could not be restored. Reload the page.'))
         },
       })
 
       setBusy(false)
     },
-    [processor],
+    [clearCanvas, processor],
   )
 
   sendRef.current = send
 
-  const dismiss = useCallback(
-    (id) => {
-      // Dismissal goes through the protocol rather than around it, so the
-      // processor's state and ours cannot drift apart.
-      processor.processMessages([{ version: 'v0.9', deleteSurface: { surfaceId: id } }])
-      setGeneratedIds((prev) => prev.filter((value) => value !== id))
-    },
-    [processor],
-  )
+  /** Put the baseline overview back on the canvas. */
+  const reset = useCallback(() => {
+    fetchBaseline()
+      .then(({ messages: batch }) => {
+        clearCanvas()
+        processor.processMessages(batch)
+        setCanvasPrompt(null)
+      })
+      .catch((error) => setLoadError(error.message))
+  }, [clearCanvas, processor])
 
-  const { baseline, generated } = useMemo(
-    () => ({
-      baseline: surfaceMap.get(BASELINE_SURFACE),
-      // Newest first, and only surfaces the processor actually holds -- a turn
-      // whose stream died leaves an id here with no surface behind it.
-      generated: generatedIds
-        .map((id) => ({ id, surface: surfaceMap.get(id) }))
-        .filter((entry) => entry.surface),
-    }),
-    [surfaceMap, generatedIds],
-  )
+  const canvas = useMemo(() => surfaceMap.get(CANVAS_SURFACE), [surfaceMap])
 
   return (
     <div className="shell">
@@ -198,43 +218,35 @@ export default function App() {
           ) : null}
 
           <MarkdownContext.Provider value={renderMarkdown}>
-            {generated.length > 0 ? (
-              <>
-                <div className="section-label">Generated</div>
-                {generated.map(({ id, surface }) => (
-                  <section className="turn" key={id}>
-                    <div className="turn-head">
-                      <span className="turn-prompt">“{prompts[id]}”</span>
-                      <button
-                        type="button"
-                        className="card-dismiss"
-                        onClick={() => dismiss(id)}
-                        aria-label="Dismiss this answer"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <ErrorBoundary>
-                      <A2uiSurface surface={surface} />
-                    </ErrorBoundary>
-                  </section>
-                ))}
-              </>
-            ) : null}
+            {canvasPrompt ? (
+              <div className="turn-head">
+                <span className="turn-prompt">“{canvasPrompt}”</span>
+                <button
+                  type="button"
+                  className="card-dismiss"
+                  onClick={reset}
+                  disabled={busy}
+                  aria-label="Reset to the overview"
+                >
+                  ×
+                </button>
+              </div>
+            ) : (
+              <div className="section-label">Overview</div>
+            )}
 
             <div className="sr-status" role="status">
-              {busy ? 'Composing an answer…' : null}
+              {busy ? 'Re-composing the dashboard…' : null}
             </div>
 
-            {busy && generated.length === 0 ? <div className="empty">Composing…</div> : null}
-
-            {baseline ? (
-              <>
-                <div className="section-label">Overview</div>
+            {canvas ? (
+              <section className="turn">
                 <ErrorBoundary>
-                  <A2uiSurface surface={baseline} />
+                  <A2uiSurface surface={canvas} />
                 </ErrorBoundary>
-              </>
+              </section>
+            ) : busy ? (
+              <div className="empty">Composing…</div>
             ) : null}
           </MarkdownContext.Provider>
         </div>
