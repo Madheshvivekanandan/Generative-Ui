@@ -5,15 +5,26 @@
 :root {
   color-scheme: light;
 
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #898781;
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
-  --border: rgba(11, 11, 11, 0.1);
+  /* Surfaces step up in small, even increments; elevation on light may also
+     carry a soft shadow (--edge), which dark mode replaces with a top
+     highlight -- shadows disappear against a dark page. */
+  --page: #f7f7f5;
+  --surface: #ffffff;
+  --raised: #f1f1ee;
+  --overlay: #ffffff;
+
+  --text-primary: #16181a;
+  --text-secondary: rgba(11, 11, 11, 0.64);
+  --text-muted: rgba(11, 11, 11, 0.45);
+
+  --grid: rgba(11, 11, 11, 0.07);
+  --axis: rgba(11, 11, 11, 0.14);
+  --border: rgba(11, 11, 11, 0.09);
+  --border-strong: rgba(11, 11, 11, 0.18);
+  --edge: 0 1px 2px rgba(11, 11, 11, 0.04);
   --hover: rgba(11, 11, 11, 0.04);
+  --focus-ring: rgba(42, 120, 214, 0.35);
+  --shadow-overlay: 0 4px 16px rgba(11, 11, 11, 0.14);
 
   --series-1: #2a78d6;
   --series-2: #eb6834;
@@ -22,27 +33,41 @@
   --series-5: #e87ba4;
   --series-6: #4a3aa7;
 
-  --good: #006300;
+  --good: #0f7b3d;
+  --good-bg: rgba(15, 123, 61, 0.1);
   --critical: #d03b3b;
+  --critical-bg: rgba(208, 59, 59, 0.09);
 
   --radius: 10px;
+  --radius-chip: 999px;
   --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
   --chat-width: 360px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
 
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #898781;
-    --grid: #2c2c2a;
-    --axis: #383835;
-    --border: rgba(255, 255, 255, 0.1);
-    --hover: rgba(255, 255, 255, 0.06);
+    --page: #0a0b0d;
+    --surface: #131518;
+    --raised: #1a1d21;
+    --overlay: #202329;
+
+    --text-primary: rgba(255, 255, 255, 0.95);
+    --text-secondary: rgba(255, 255, 255, 0.62);
+    --text-muted: rgba(255, 255, 255, 0.42);
+
+    --grid: rgba(255, 255, 255, 0.07);
+    --axis: rgba(255, 255, 255, 0.14);
+    --border: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    /* A 1px top highlight instead of a shadow: on dark, elevation reads as
+       "lit from above", not as a halo. */
+    --edge: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --hover: rgba(255, 255, 255, 0.05);
+    --focus-ring: rgba(57, 135, 229, 0.4);
+    --shadow-overlay: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
 
     --series-1: #3987e5;
     --series-2: #d95926;
@@ -51,8 +76,10 @@
     --series-5: #d55181;
     --series-6: #9085e9;
 
-    --good: #0ca30c;
-    --critical: #d03b3b;
+    --good: #3fb970;
+    --good-bg: rgba(63, 185, 112, 0.13);
+    --critical: #f0564d;
+    --critical-bg: rgba(240, 86, 77, 0.12);
   }
 }
 
@@ -111,17 +138,22 @@
    wrapper class of its own -- the card is the only reliable ancestor. */
 .card button {
   border: 1px solid var(--border);
-  background: var(--page);
+  background: transparent;
   color: var(--text-secondary);
-  border-radius: 999px;
+  border-radius: var(--radius-chip);
   padding: 4px 11px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
 }
 
 .card button:hover {
-  background: var(--hover);
+  background: var(--raised);
+  border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
@@ -136,6 +168,8 @@ body {
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.5;
+  /* Every number in the app aligns and holds width while values stream in. */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -144,6 +178,12 @@ input,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
 }
 
 /* ---------- layout ----------
@@ -218,6 +258,7 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  box-shadow: var(--edge);
   padding: 18px;
   /* Flex children default to min-width:auto, which lets a wide table push its
      tile past its share of the Row. */
@@ -244,11 +285,50 @@ textarea {
 
 /* ---------- one generated turn ----------
    Layout inside a turn belongs to the agent: it arrives as A2UI Rows and
-   Columns. All this contributes is the frame around it and the line saying
-   which request produced it. */
+   Columns. All this contributes is the frame around it, the line saying which
+   request produced it, and the entrance: the canvas re-composes in place, so
+   the new answer rises 8px and fades in (strong ease-out, under 300ms), with
+   a small stagger across sibling cards. Transform + opacity only. */
 
 .turn {
   margin-bottom: 20px;
+  animation: turn-enter 280ms var(--ease-out) both;
+}
+
+.turn .card {
+  animation: turn-enter 300ms var(--ease-out) both;
+}
+
+.turn .card:nth-of-type(2) {
+  animation-delay: 50ms;
+}
+
+.turn .card:nth-of-type(3) {
+  animation-delay: 100ms;
+}
+
+.turn .card:nth-of-type(4) {
+  animation-delay: 150ms;
+}
+
+@keyframes turn-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn,
+  .turn .card {
+    animation-duration: 1ms;
+    animation-delay: 0ms;
+  }
 }
 
 .turn-head {
@@ -292,22 +372,27 @@ textarea {
   color: var(--text-primary);
 }
 
-/* ---------- stat ---------- */
+/* ---------- stat ----------
+   Anatomy: muted label, then the number (weight 600 -- heavier digits go
+   blobby), then a delta chip that encodes direction three ways (glyph, sign
+   color, tinted pill) so color is never the only signal. */
 
 .stat-label {
+  margin: 0;
   font-size: 12px;
+  font-weight: 500;
   color: var(--text-secondary);
 }
 
 .stat-value {
-  margin: 4px 0 0;
-  font-size: 28px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  margin: 5px 0 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .stat-foot {
-  margin-top: 6px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -316,19 +401,28 @@ textarea {
 }
 
 .delta {
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
 }
 
 .delta-up {
   color: var(--good);
+  background: var(--good-bg);
 }
 
 .delta-down {
   color: var(--critical);
+  background: var(--critical-bg);
 }
 
 .delta-flat {
   color: var(--text-muted);
+  background: var(--hover);
 }
 
 /* ---------- table ---------- */
@@ -356,7 +450,7 @@ td {
 th {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -381,7 +475,7 @@ tbody tr:hover td {
   background: var(--hover);
 }
 
-/* ---------- note / empty ---------- */
+/* ---------- note / empty / composing skeleton ---------- */
 
 .note-body {
   margin: 0;
@@ -394,6 +488,55 @@ tbody tr:hover td {
   padding: 22px;
   text-align: center;
   color: var(--text-muted);
+}
+
+/* Shown while the canvas is cleared and the next answer has not yet painted:
+   a skeleton shaped like the layout it replaces, not a spinner. */
+.skeleton {
+  display: grid;
+  gap: 16px;
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.skeleton-tile,
+.skeleton-chart {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(100deg, transparent 30%, var(--hover) 50%, transparent 70%) var(--surface);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.6s linear infinite;
+}
+
+.skeleton-tile {
+  height: 108px;
+}
+
+.skeleton-chart {
+  height: 240px;
+}
+
+@keyframes skeleton-sweep {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-tile,
+  .skeleton-chart {
+    animation: none;
+    background: var(--surface);
+  }
 }
 
 /* ---------- chat ---------- */
@@ -436,32 +579,62 @@ tbody tr:hover td {
   padding: 0 18px 16px;
 }
 
+/* Assistant turns are plain rows -- bubble chrome around model prose reads
+   dated; only the user's own words get a (subtle, raised) bubble. */
 .chat-msg {
-  align-self: flex-start;
-  max-width: 78%;
-  padding: 6px 11px;
-  border-radius: 12px;
+  align-self: stretch;
+  max-width: 100%;
+  padding: 2px 0;
   font-size: 13px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  line-height: 1.6;
   color: var(--text-secondary);
 }
 
 .chat-msg-user {
   align-self: flex-end;
-  background: var(--series-1);
-  border-color: transparent;
-  color: #fff;
+  max-width: 85%;
+  padding: 7px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--text-primary);
 }
 
 .chat-msg-error {
-  border-color: var(--critical);
   color: var(--critical);
 }
 
+/* A quiet shimmer over the status word, not bouncing dots. */
 .chat-msg-busy {
-  color: var(--text-muted);
-  font-style: italic;
+  background: linear-gradient(
+    90deg,
+    var(--text-muted) 35%,
+    var(--text-primary) 50%,
+    var(--text-muted) 65%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: busy-sweep 1.8s linear infinite;
+}
+
+@keyframes busy-sweep {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-msg-busy {
+    animation: none;
+    background: none;
+    color: var(--text-muted);
+  }
 }
 
 .chat-form {
@@ -471,6 +644,17 @@ tbody tr:hover td {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 8px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.chat-form:focus-within {
+  border-color: var(--series-1);
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+/* The ring on the form is the visible focus state for the input inside it. */
+.chat-form input:focus-visible {
+  outline: none;
 }
 
 .chat-form input {
@@ -511,16 +695,21 @@ tbody tr:hover td {
 
 .chip {
   border: 1px solid var(--border);
-  background: var(--page);
+  background: transparent;
   color: var(--text-secondary);
-  border-radius: 999px;
-  padding: 4px 11px;
+  border-radius: var(--radius-chip);
+  padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
 }
 
 .chip:hover {
-  background: var(--hover);
+  background: var(--raised);
+  border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
@@ -556,11 +745,11 @@ tbody tr:hover td {
 }
 
 .tooltip {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--overlay);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
-  padding: 8px 10px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  padding: 8px 12px;
+  box-shadow: var(--shadow-overlay);
   font-size: 12px;
 }
 
