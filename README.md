@@ -202,24 +202,23 @@ Redis means replacing that one module.
 
 ## Backend layout
 
-Seven flat modules with one responsibility each; the import graph is a clean
-line, which is why there are no directories — they would only restate it.
+Four packages plus three leaf modules, one concern per file (and one class per
+file throughout `schemas/`). Imports point one way: `main → api → agent → a2ui
+→ schemas`.
 
-| Module | Owns |
+| Package / module | Owns |
 |---|---|
-| `main.py` | routes + SSE framing, nothing else |
-| `agent.py` | the streaming loop: two passes, prompts, fallbacks |
-| `a2ui.py` | the wire format: builders, `sanitize()`, block → A2UI compiler |
-| `schemas.py` | both contracts: the LLM block catalog and the HTTP models |
-| `session.py` | the rolling per-session transcript |
+| `main.py` | app assembly: env, logging, CORS, routers |
+| `api/` | one router per route family (`health`, `dashboard`, `generate`) + SSE framing (`streams`) |
+| `agent/` | the streaming loop split by concern: `runner`, `prompts`, `fallbacks`, `emit`, `follow_ups`, `events`, `config` |
+| `a2ui/` | the wire format: `messages` (builders), `sanitizer`, `compiler`, `constants` |
+| `schemas/` | one Pydantic model per file; the package `__init__` re-exports them all |
+| `session.py` | the rolling per-session transcript (one class) |
 | `baseline.py` / `mock_data.py` | the load-time dashboard and its dataset |
 
-Imports point one way: `main → agent → a2ui → schemas`. Restructure into a
-package the day a second route family, real persistence, or a ~500-line module
-arrives — not before. Tests live in `backend/tests/` (pure functions only —
-the sanitizer, the compiler, follow-up cleaning, the session window) and run
-with `python -m pytest` from `backend/`; tool config is in
-`backend/pyproject.toml`.
+Tests live in `backend/tests/` (pure functions only — the sanitizer, the
+compiler, follow-up cleaning, the session window) and run with
+`python -m pytest` from `backend/`; tool config is in `backend/pyproject.toml`.
 
 ## Things deliberately left out
 
