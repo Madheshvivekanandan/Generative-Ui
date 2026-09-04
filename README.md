@@ -2,9 +2,12 @@
 
 You type a request in plain English. An agent composes a small layout from a
 fixed component catalog, and it streams into the page as it is composed — as
-[A2UI](https://a2ui.org) messages, rendered by `@a2ui/react`. The cards it
-produces carry their own buttons, and pressing one sends an action back to the
-agent, which answers with new UI.
+[A2UI](https://a2ui.org) messages, rendered by `@a2ui/react`. Every answer
+**re-composes one fixed canvas in place**: the client clears the surface, the
+stream re-creates the same id at the same position, and the dashboard re-forms
+rather than stacking answer under answer. The cards it produces carry their own
+buttons, and pressing one sends an action back to the agent, which answers by
+re-composing the canvas again.
 
 ```
 Browser                                    FastAPI
@@ -38,8 +41,17 @@ action round-trip are not features we built; they are what the protocol *is*.
 production spec and the only version `@a2ui/react` implements natively today.
 The differences that matter here are that v0.9's `createSurface` carries no
 inline `components` or `dataModel` (they arrive as separate update messages) and
-that there is no client-to-server `actionResponse` yet — our action handler
-answers with a fresh surface instead.
+that v0.9's only renderer-to-agent messages are fire-and-forget `action` and
+`error` — the two-way calls (`callAgentFunction`/`agentFunctionResponse`) are a
+v1.0 addition — so our action handler answers by re-composing the canvas.
+
+**One canvas, on purpose.** The baseline dashboard and every generated answer
+render into the same surface id (`dashboard`). Before a turn streams, the client
+sends `deleteSurface`; the turn's `createSurface` then re-opens that id in the
+same position (v0.9.1 explicitly allows reusing a deleted surface's id). The
+result is that asking a question *re-forms the dashboard* instead of appending
+a new one below it — the interface is regenerated, not accumulated. The ×
+control restores the baseline through the same path.
 
 ## Two contracts, on purpose
 

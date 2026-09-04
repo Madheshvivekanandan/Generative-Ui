@@ -2,9 +2,12 @@
 
 POST a free-text message and the response is a stream of A2UI messages that
 `@a2ui/react` renders directly -- `createSurface`, then `updateDataModel` and
-`updateComponents` as the agent composes the answer. Buttons the agent puts on
-those cards post back to `/api/action`, which is the client-to-server half of
-the loop and re-enters the same generator with the conversation intact.
+`updateComponents` as the agent composes the answer. Every turn re-composes
+ONE fixed surface: the client deletes it, this stream re-creates the same id,
+and the dashboard re-forms in place rather than stacking answer under answer.
+Buttons the agent puts on those cards post back to `/api/action`, which is the
+client-to-server half of the loop and re-enters the same generator with the
+conversation intact.
 
 The stream never raises to the client: a missing API key, an OpenAI error or a
 schema violation all resolve to a `text_note` block, so the renderer is never
@@ -16,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import uuid
 from typing import Iterator
 
 from dotenv import load_dotenv
@@ -45,9 +47,12 @@ ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
 ).split(",")
 
-# The baseline dashboard's surface. Fixed, so a reload replaces it rather than
-# stacking a second copy alongside the first.
-BASELINE_SURFACE = "dashboard"
+# The one surface everything renders into -- the baseline at load, and every
+# generated turn after it. A fixed id is what makes the dashboard re-compose in
+# place: the client deletes it, the next createSurface re-opens the same id at
+# the same position, and replace-wins semantics do the rest. (v0.9.1 explicitly
+# allows reusing the id of a deleted surface.)
+CANVAS_SURFACE = "dashboard"
 
 app = FastAPI(title="Generative UI — A2UI Financial Dashboard", version="2.0.0")
 app.add_middleware(
@@ -70,12 +75,17 @@ def _sse(event: agent.Event) -> str:
 
 
 def _turn_stream(session_id: str, message: str) -> Iterator[str]:
-    """Run one turn, forwarding every message and recording the transcript."""
-    history = store.history(session_id)
-    surface_id = f"turn-{uuid.uuid4().hex[:12]}"
+    """Run one turn into the canvas surface, recording the transcript.
 
-    # The client needs the surface id before anything else so it can slot the
-    # card into the layout the moment createSurface lands.
+    The surface id is always the canvas: the client clears it with a
+    `deleteSurface` before this stream's `createSurface` re-opens it, which is
+    what makes the new answer form at the same place, same position.
+    """
+    history = store.history(session_id)
+    surface_id = CANVAS_SURFACE
+
+    # Announced first so any client (curl included) knows which surface the
+    # turn is about to re-compose before the first A2UI frame lands.
     yield f"event: open\ndata: {json.dumps({'surface_id': surface_id})}\n\n"
 
     summary = ""
@@ -130,13 +140,13 @@ def dashboard() -> DashboardResponse:
 def dashboard_a2ui() -> dict:
     """The load-time dashboard, compiled by the same path a generated turn takes.
 
-    It arrives in one `createSurface` rather than a stream because none of it
-    is being composed live -- but the components and bindings are identical to
-    what the agent emits, which is the point.
+    It arrives in one batch rather than a stream because none of it is being
+    composed live -- but it fills the same canvas surface the agent re-composes,
+    through the same compiler, which is the point.
     """
     return {
-        "surface_id": BASELINE_SURFACE,
-        "messages": a2ui.full_surface(BASELINE_SURFACE, baseline.blocks()),
+        "surface_id": CANVAS_SURFACE,
+        "messages": a2ui.full_surface(CANVAS_SURFACE, baseline.blocks()),
     }
 
 
