@@ -75,7 +75,7 @@ export default function ChatBox({ messages, busy, onSend }) {
             </Fragment>
           ))
         )}
-        {busy ? <div className="chat-msg chat-msg-busy">Thinking…</div> : null}
+        {busy ? <div className="chat-msg chat-msg-busy">Composing the dashboard…</div> : null}
       </div>
 
       <div className="chat-foot">

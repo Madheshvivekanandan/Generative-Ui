@@ -246,7 +246,15 @@ export default function App() {
                 </ErrorBoundary>
               </section>
             ) : busy ? (
-              <div className="empty">Composing…</div>
+              // The canvas is cleared and the first frame hasn't landed: a
+              // skeleton shaped like the layout it replaces, not a spinner.
+              <div className="skeleton" aria-hidden="true">
+                <div className="skeleton-row">
+                  <div className="skeleton-tile" />
+                  <div className="skeleton-tile" />
+                </div>
+                <div className="skeleton-chart" />
+              </div>
             ) : null}
           </MarkdownContext.Provider>
         </div>
