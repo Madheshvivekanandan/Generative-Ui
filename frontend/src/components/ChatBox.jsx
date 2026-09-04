@@ -50,8 +50,8 @@ export default function ChatBox({ messages, busy, onSend }) {
   return (
     <aside className="chat">
       <div className="chat-head">
-        <h2>Ask for a component</h2>
-        <p>Each request adds a card to the dashboard.</p>
+        <h2>Ask for a view</h2>
+        <p>Each request re-composes the dashboard in place.</p>
       </div>
 
       <div className="chat-log" ref={logRef}>
