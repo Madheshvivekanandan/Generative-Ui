@@ -200,6 +200,27 @@ explanation, so "that chart" has something to point at.
 In-memory and process-local: a restart is a fresh conversation. Swapping in
 Redis means replacing that one module.
 
+## Backend layout
+
+Seven flat modules with one responsibility each; the import graph is a clean
+line, which is why there are no directories — they would only restate it.
+
+| Module | Owns |
+|---|---|
+| `main.py` | routes + SSE framing, nothing else |
+| `agent.py` | the streaming loop: two passes, prompts, fallbacks |
+| `a2ui.py` | the wire format: builders, `sanitize()`, block → A2UI compiler |
+| `schemas.py` | both contracts: the LLM block catalog and the HTTP models |
+| `session.py` | the rolling per-session transcript |
+| `baseline.py` / `mock_data.py` | the load-time dashboard and its dataset |
+
+Imports point one way: `main → agent → a2ui → schemas`. Restructure into a
+package the day a second route family, real persistence, or a ~500-line module
+arrives — not before. Tests live in `backend/tests/` (pure functions only —
+the sanitizer, the compiler, follow-up cleaning, the session window) and run
+with `python -m pytest` from `backend/`; tool config is in
+`backend/pyproject.toml`.
+
 ## Things deliberately left out
 
 No auth, no database, no persistence. Generated surfaces live in the renderer's
