@@ -227,6 +227,16 @@ state and disappear on reload. The dataset is a module-level constant in
 `backend/mock_data.py`. No observability beyond log lines — no traces, no
 token accounting, no record of which prompts produced which components.
 
+## If you implement this yourself
+
+Two gotchas that cost real time:
+
+- **npm version ≠ protocol version.** `@a2ui/react` 0.10.x is the package line
+  that implements protocol **v0.9** — every import here is from `/v0_9` paths.
+- **v0.9's `createSurface` carries no content.** Components and data arrive as
+  separate update messages. Inline payloads are a v1.0 feature; a v0.9 renderer
+  silently drops them and the surface sticks on its placeholder.
+
 ## Notes
 
 - Set `OPENAI_MODEL` in `.env` to use something other than `gpt-4o-mini`; any
