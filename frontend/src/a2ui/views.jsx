@@ -11,14 +11,16 @@
  * to draw -- empty is a normal outcome, not an error.
  */
 
+import { useId } from 'react'
 import {
+  Area,
   Bar,
   BarChart as RechartsBarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
   Legend,
   Line,
-  LineChart as RechartsLineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -45,10 +47,13 @@ function AxisLabels({ xLabel, yLabel }) {
   )
 }
 
+/* Recessive axes: no axis or tick lines at all -- the dashed horizontal grid
+   carries alignment, and the ticks are small muted labels. */
 const axisProps = {
-  stroke: 'var(--axis)',
   tickLine: false,
-  axisLine: { stroke: 'var(--axis)' },
+  axisLine: false,
+  tick: { fill: 'var(--text-muted)', fontSize: 11 },
+  tickMargin: 8,
 }
 
 export function EmptyState({ label = 'No data to plot for this request.' }) {
@@ -85,20 +90,46 @@ export function StatCardView({ title, value, unit, deltaPct, deltaDirection, cap
 export function LineChartView({ series: rawSeries, unit, xLabel, yLabel }) {
   const resolvedUnit = normalizeUnit(unit)
   const { series, rows } = toChartRows(rawSeries)
+  // Gradient ids are document-global in SVG; several charts can be on the
+  // canvas at once, so each card's gradient gets its own id.
+  const gradientId = useId()
   if (!rows.length) return <EmptyState />
+
+  // A soft fill under the line reads as "amount", so it is reserved for the
+  // single-series case -- stacked translucent fills over each other go muddy.
+  const hasAreaFill = series.length === 1
 
   return (
     <>
       <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-        <RechartsLineChart data={rows} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-          <CartesianGrid stroke="var(--grid)" vertical={false} />
+        <ComposedChart data={rows} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+          {hasAreaFill ? (
+            <defs>
+              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={seriesColor(0)} stopOpacity={0.22} />
+                <stop offset="100%" stopColor={seriesColor(0)} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+          ) : null}
+          <CartesianGrid stroke="var(--grid)" strokeDasharray="3 3" vertical={false} />
           <XAxis dataKey="x" {...axisProps} />
           <YAxis {...axisProps} width={62} tickFormatter={(v) => formatCompact(v, resolvedUnit)} />
           <Tooltip
             content={<ChartTooltip unit={resolvedUnit} />}
             cursor={{ stroke: 'var(--axis)' }}
           />
-          {series.length > 1 ? <Legend iconType="plainline" /> : null}
+          {series.length > 1 ? <Legend iconType="circle" iconSize={8} /> : null}
+          {hasAreaFill ? (
+            <Area
+              dataKey="s0"
+              type="monotone"
+              fill={`url(#${gradientId})`}
+              stroke="none"
+              connectNulls
+              legendType="none"
+              tooltipType="none"
+            />
+          ) : null}
           {series.map((entry, index) => (
             <Line
               key={entry.name}
@@ -112,7 +143,7 @@ export function LineChartView({ series: rawSeries, unit, xLabel, yLabel }) {
               connectNulls
             />
           ))}
-        </RechartsLineChart>
+        </ComposedChart>
       </ResponsiveContainer>
       <AxisLabels xLabel={str(xLabel)} yLabel={str(yLabel)} />
     </>
@@ -134,11 +165,11 @@ export function BarChartView({ series: rawSeries, unit, xLabel, yLabel, stacked 
           margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
           barCategoryGap="22%"
         >
-          <CartesianGrid stroke="var(--grid)" vertical={false} />
-          <XAxis dataKey="x" {...axisProps} interval={0} tickMargin={6} />
+          <CartesianGrid stroke="var(--grid)" strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="x" {...axisProps} interval={0} />
           <YAxis {...axisProps} width={62} tickFormatter={(v) => formatCompact(v, resolvedUnit)} />
           <Tooltip content={<ChartTooltip unit={resolvedUnit} />} cursor={{ fill: 'var(--hover)' }} />
-          {series.length > 1 ? <Legend iconType="square" /> : null}
+          {series.length > 1 ? <Legend iconType="circle" iconSize={8} /> : null}
           {series.map((entry, index) => (
             <Bar
               key={entry.name}
@@ -188,7 +219,7 @@ export function DonutChartView({ slices: rawSlices, unit }) {
           ))}
         </Pie>
         <Tooltip content={<ChartTooltip unit={resolvedUnit} />} />
-        <Legend iconType="square" />
+        <Legend iconType="circle" iconSize={8} />
       </PieChart>
     </ResponsiveContainer>
   )
