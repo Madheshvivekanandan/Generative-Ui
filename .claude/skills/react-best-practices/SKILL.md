@@ -1,6 +1,6 @@
 ---
 name: react-best-practices
-description: React standard for the Gen_Ui frontend — a Vite + React 19 SPA (plain JSX, no TypeScript) that renders a financial dashboard from an LLM-chosen component catalog, using Recharts. Load BEFORE writing, modifying, or reviewing any frontend code in this repo — anything under frontend/src/ (App.jsx, api.js, lib/, components/) or any .jsx/.css file. Covers the renderer contract, defensive rendering, error boundaries, chart/palette rules, state, a11y, performance, and a review checklist.
+description: React standard for the Gen_Ui frontend — a Vite + React 19 SPA (plain JSX, no TypeScript) that renders a financial dashboard from A2UI v0.9 messages via @a2ui/react, with an LLM-constrained component catalog and Recharts views. Load BEFORE writing, modifying, or reviewing any frontend code in this repo — anything under frontend/src/ (App.jsx, a2ui/, components/, lib/) or any .jsx/.css file. Covers the A2UI catalog contract, defensive rendering, error boundaries, the single-canvas model, chart/palette rules, state, a11y, performance, and a review checklist.
 ---
 
 # React Best Practices — Gen_Ui frontend
@@ -14,80 +14,104 @@ Engineering's react-best-practices (MIT), and WCAG, cut down to what this app is
 ```
 frontend/src/
   main.jsx                 # entry
-  App.jsx                  # layout, dashboard state, baseline component objects
-  api.js                   # the ENTIRE backend contract — the only place fetch appears
+  App.jsx                  # the MessageProcessor wiring, canvas state, chat state
   index.css                # design tokens + all styling (no CSS-in-JS, no framework)
-  lib/format.js            # number formatting + series color slots
+  a2ui/
+    transport.js           # hand-rolled SSE reader (fetch + getReader; EventSource can't POST)
+    catalog.jsx            # THE CATALOG — Zod-described components the renderer may draw
+    coerce.js              # str/num/arr readers + toChartRows; nothing here throws
+    views.jsx              # the six Recharts views; know nothing about A2UI
   components/
-    ComponentRenderer.jsx  # the whitelist dispatch — the heart of the app
-    ChatBox.jsx  Card.jsx  ErrorBoundary.jsx  ChartTooltip.jsx
+    ChatBox.jsx  ErrorBoundary.jsx  ChartTooltip.jsx
+  lib/format.js            # number formatting + series color slots
 ```
 
 - **Vite + React 19, plain JSX. There is no TypeScript**, no `tsc`, no type-checking gate.
-- **Recharts** is the only runtime dependency beyond React.
-- **Plain CSS with custom properties** in `index.css`. No MUI, no Tailwind, no styled-components.
+- Runtime deps: `react`, `react-dom`, `@a2ui/react`, `@a2ui/web_core`, `recharts`, `zod`.
+  (`@a2ui/markdown-it` is imported in App.jsx but supplied transitively by `@a2ui/react`.)
+- **npm version ≠ protocol version:** the packages are 0.10.x but every import is from
+  `/v0_9` subpaths — the 0.10.x package line implements protocol v0.9.
+- **`zod` must stay on v3.** The binder classifies props by reading Zod 3 internals;
+  Zod 4 renamed them and the failure is silent (`[object Object]` everywhere).
+- **Plain CSS with custom properties** in `index.css`. No MUI, no Tailwind.
 - No router, no state library, no data-fetching library.
 
 **Rules that do not apply here — never suggest them:** RSC / `"use client"`, anything
-`next/*`, SSR/hydration, Refine or TanStack Query hooks, MUI barrel-import rules,
-react-hook-form, `useSearchParams` (there is no router).
+`next/*`, SSR/hydration, TanStack Query, MUI barrel-import rules, react-hook-form,
+`useSearchParams` (there is no router).
 
-## 1. The renderer contract
+## 1. The A2UI contract
 
-The backend sends `{type, ...props}` chosen from a fixed catalog. `ComponentRenderer.jsx`
-turns that into a card. This is the one thing to understand before editing anything.
+The backend streams A2UI v0.9 messages; `@a2ui/react` renders them against the catalog.
+This is the one thing to understand before editing anything.
 
-- **Dispatch through the `RENDERERS` whitelist**, checked with
-  `Object.prototype.hasOwnProperty`. Never `RENDERERS[component.type]` bare — an unknown
-  or prototype-polluting `type` must render an explanatory card, not throw.
-- **Treat every field as untrusted.** The payload comes from an LLM. Read it through the
-  `str()` / `num()` / `arr()` coercers at the top of the file; never index into
-  `component.series[0].points[0]` directly. A `null`, a string where a number belongs, or
-  a missing array is expected input, not an exceptional case.
-- **A renderer returns `<EmptyState/>` rather than throwing** when there is nothing to
-  draw. Empty is a normal outcome.
-- **Adding a component type is exactly two edits**: a Pydantic model in `backend/schemas.py`
-  and a renderer registered in `RENDERERS`. Wide types also go in `WIDE_TYPES`.
-- **The baseline dashboard uses the same catalog.** `baselineComponents()` in `App.jsx`
-  builds the load-time cards as plain component objects through the same renderer. Never
-  add a privileged path for "real" cards — if it renders on load, the model can produce it.
+- **`financeCatalog` in `a2ui/catalog.jsx` is the security boundary.** The renderer
+  refuses any component name not in it — enforced by the library, not by a check someone
+  must remember to write. A2UI's basic components are listed one by one instead of
+  spreading `basicCatalog`, so the file is an honest inventory of what an agent can put
+  on screen.
+- **Declare twice:** each custom component is a Zod schema (its public API — all props
+  `.optional()`, because the data model can be mid-stream when a component first renders)
+  plus an implementation via `createComponentImplementation` that receives already-
+  resolved values. Views never see a `{path: ...}` binding.
+- **`Card` replaces A2UI's own for exactly one reason: the error boundary.** A card is
+  the unit of failure; the boundary must live at the card, so one malformed chart can
+  break only its own card. Never move the boundary to the surface.
+- **One canvas.** Everything renders into the fixed surface id `dashboard`
+  (`CANVAS_SURFACE`, matching `backend/main.py`). `send()` clears it with a
+  `deleteSurface` *through the processor* before each turn streams, so the answer
+  re-forms in place. Never splice React state around the processor — protocol state and
+  app state must not drift.
+- **`processor.model.surfacesMap` is externally owned and mutated in place.** React
+  cannot observe it; the app re-snapshots (`new Map(...)`) on `onSurfaceCreated` /
+  `onSurfaceDeleted`. Keep that pattern.
+- **The action handler is guarded while a turn is streaming** (`busyRef`) — with a single
+  canvas, a mid-stream button press would put two writers on one surface.
+- **Two SSE channels by `event:` name:** `a2ui` frames go straight to
+  `processor.processMessages`; `meta` frames drive the chat log and are NOT A2UI. A
+  malformed frame is dropped, never fatal — the authoritative pass resends state.
+- **Adding a component type is exactly three edits**: a Pydantic model in
+  `backend/schemas.py`, a `_VIEW` row in `backend/a2ui.py`, and a component registered in
+  `catalog.jsx`. If a change needs more, it is wrong.
+- Markdown is opt-in via `MarkdownContext` (sanitized through DOMPurify). Never render
+  agent text through `dangerouslySetInnerHTML`.
 
 ## 2. Error handling — the app must not be able to crash
 
-This is the product requirement, not a nicety. Five layers, each catching what the others
-cannot; **never remove one because another looks sufficient.**
+This is the product requirement. Layers, each catching what the others cannot;
+**never remove one because another looks sufficient:**
 
 | Layer | Catches |
 |---|---|
-| Backend structured outputs | invented component types, missing props |
-| Backend `sanitize()` | valid shape, unusable content |
-| `api.js` try/catch | network down, non-JSON, non-2xx |
-| Coercers + whitelist in `ComponentRenderer` | wrong types, nulls, unknown `type` |
-| `<ErrorBoundary>` per card | any render-time throw |
+| Backend structured outputs + `sanitize()` | invented types, missing props, unusable content |
+| `transport.js` | network death, malformed frames, non-2xx (resolves via `onError`, never rejects) |
+| Catalog whitelist (`@a2ui/react`) | unknown component names |
+| Coercers in `coerce.js` | wrong types, nulls, missing arrays |
+| `<ErrorBoundary>` per card (inside `Card`) | any render-time throw |
 
-- **Every card is individually wrapped in `<ErrorBoundary>`.** One bad card must never
-  blank the dashboard.
-- **`api.js` resolves, it does not throw**, for `generateComponent` — it returns a
-  synthetic `text_note` on network failure so callers have one shape to handle.
-- **Never render a raw error string to the user.** Error boundaries and fallback cards show
-  generic prose; the detail goes to `console.error`. Backend exception text and component
-  stacks are internal detail.
-- Show **loading, empty, and error** as three distinct states. Never conflate empty with error.
-- Boundaries catch render errors only — never async or event-handler errors. Those need
-  explicit try/catch.
+- **Treat every field as untrusted.** Payloads come from an LLM. Read through
+  `str()` / `num()` / `arr()`; never index into `series[0].points[0]` directly. A `null`
+  or a string-where-a-number-belongs is expected input, not an exceptional case.
+- **A view returns `<EmptyState/>` rather than throwing** when there is nothing to draw.
+- **Never render a raw error string to the user.** Boundaries and fallbacks show generic
+  prose; detail goes to `console.error`.
+- A dead transport restores the baseline into the canvas rather than leaving it blank.
+- Boundaries catch render errors only — async/event-handler errors need try/catch.
 
 ## 3. State
 
-- **Local `useState` in the nearest owner** is correct here. There is no server-state
-  library and no router, so a `useEffect` + `fetch` + `setState` for the dashboard payload
-  is the right call, not a smell — but keep it to `api.js` calls in `App.jsx`, and keep the
-  `cancelled` flag so a late response cannot set state after unmount.
-- **Derive, never duplicate.** `baseline` is a `useMemo` over the fetched dataset, not a
-  second piece of state. No `useEffect` that only computes something render could.
+- **Local `useState` in the nearest owner** is correct here. Keep fetches in
+  `a2ui/transport.js`, called from `App.jsx`, with a `cancelled` flag so a late response
+  cannot set state after unmount.
+- **Molecule data is NOT React state** — it lives in the processor's data model. React
+  state holds only chrome: messages, busy, canvasPrompt, the surface snapshot.
+- **Derive, never duplicate.** `canvas` is a `useMemo` over the snapshot, not a second
+  piece of state.
 - **Functional updates** (`setMessages(prev => …)`) so callbacks stay stable.
+- The processor is created once in `useMemo`; `sendRef`/`busyRef` break the circular
+  dependency with `send` without rebuilding it (a rebuild discards every surface).
 - IDs come from a `useRef` counter, never array index or `Date.now()`.
-- Name state for its domain: `dashboard`, `generated`, `messages`. **Never `data`, `item`,
-  `tmp`, `res`, `x`.**
+- Name state for its domain: `canvasPrompt`, `messages`, `busy`. **Never `data`, `tmp`.**
 
 ## 4. Components & naming
 
@@ -98,119 +122,114 @@ cannot; **never remove one because another looks sufficient.**
 | JSX nesting | ≤ 4 |
 | Props | ≤ 8 |
 
-`ComponentRenderer.jsx` is near the file limit by design — it holds all six renderers plus
-dispatch, which keeps the catalog readable in one place. **If it grows past ~300 lines,
-split the renderers into `components/renderers/` rather than trimming the coercers.**
-
 - **Never define a component inside a component** — it remounts and loses state every
   parent render. `Suggestions` in `ChatBox.jsx` is module-scope for this reason.
 - `handle*` for internal handlers, `on*` for props. `is/has/can/should` for booleans.
-- `UPPER_SNAKE` module constants — `MAX_SERIES`, `OPENERS`, `CHART_HEIGHT`. No inline magic numbers.
-- Ternaries for conditional render, never `&&` with a possibly-numeric left side
-  (`{count && <X/>}` renders a literal `0`).
+- `UPPER_SNAKE` module constants — `CHART_HEIGHT`, `MAX_SLICES`, `CANVAS_SURFACE`.
+- Ternaries for conditional render, never `&&` with a possibly-numeric left side.
 
 ## 5. Charts (Recharts) — the palette is validated, don't improvise
 
 The color system was validated for colorblind separation against both surfaces. Treat it
 as fixed.
 
-- **Series colors come from `seriesColor(index)` in `lib/format.js`**, assigned by slot in
-  fixed order. Never hardcode a hex in a component, and never let color follow rank —
-  filtering a series out must not repaint the survivors.
-- **Cap at 4 series / 6 donut slices.** These mirror the backend's `sanitize()` limits;
-  change both together.
+- **Series colors come from `seriesColor(index)` in `lib/format.js`**, assigned by slot
+  in fixed order. Never hardcode a hex; never let color follow rank — filtering a series
+  out must not repaint the survivors.
+- **Cap at 4 series / 6 donut slices** — mirrors the backend's `sanitize()`; change both
+  together (`toChartRows` and the donut view carry the frontend halves).
 - **One y-axis. Never a dual-axis chart.** Two measures of different scale → two cards.
-- Colors are CSS custom properties (`var(--series-1)`) so light/dark swap in one place.
-  Both modes are defined in `index.css` — dark is a selected set of steps, not a flip.
-- Every chart ships a hover tooltip (`ChartTooltip`) and a legend when there are ≥ 2 series
-  (one series needs none — the title names it).
-- Thin marks: 2px lines, `dot={false}` with an `activeDot` on hover, 4px bar corner radius,
-  a 2px surface-colored gap between stacked fills.
-- Numbers go through `formatCompact` (axes) / `formatFull` (tooltips, stat values). Never
-  hand-concatenate a currency symbol.
-- Text wears text tokens (`--text-primary/secondary/muted`), never a series color.
+- Recessive chrome: no axis or tick lines; dashed horizontal gridlines only
+  (`var(--grid)`); muted 11px ticks. Gradient area fill under **single-series** lines
+  only (unique ids via `useId` — several charts can share the canvas).
+- Legend only for ≥ 2 series (dot icons); one series is named by the card title.
+- Every chart ships the hover tooltip (`ChartTooltip`); numbers go through
+  `formatCompact` (axes) / `formatFull` (tooltips, stat values).
+- Colors are CSS custom properties; both themes are separately chosen steps, not a flip.
+- Text wears text tokens, never a series color.
 
-## 6. Accessibility
+## 6. Accessibility & motion
 
-- Icon-only controls need an accessible name — the card dismiss button uses `aria-label`.
-- The chat input has an `aria-label`; keep it, there is no visible `<label>`.
-- Announce async results: the "Thinking…" row and new-card arrival should be reachable by
-  a screen reader (`role="status"` is the cheapest fix — **currently missing, worth adding**).
+- Icon-only controls need an accessible name — the canvas reset button uses `aria-label`.
+- The chat input keeps its `aria-label`; there is no visible `<label>`.
+- Async results are announced via the `role="status"` live region in App.jsx — keep it.
 - Semantic elements first: `<main>`, `<aside>`, `<section>`, `<table>`, real `<button>`s.
-- Never encode meaning by color alone — the KPI delta pairs its color with an arrow glyph.
-- Keep focus outlines. Body text contrast ≥ 4.5:1.
+- Never encode meaning by color alone — deltas pair color with a glyph and sign.
+- Keep focus states: the global `:focus-visible` outline and the chat form's ring.
+- **Motion is transform/opacity only, under 300ms, strong ease-out** (`--ease-out`), and
+  every animation has a `prefers-reduced-motion` fallback. The canvas entrance
+  (`turn-enter`), skeleton sweep, and busy shimmer all follow this — new motion must too.
 
 ## 7. Performance
 
 Correctness first; only optimize with a measurement. Relevant here:
 
-- **`recharts` is imported as a barrel and the bundle is ~609 kB (178 kB gzipped), one
-  chunk, no code splitting.** This is the known baseline. If it becomes a problem, the fix
-  is `React.lazy` + `<Suspense>` around the chart renderers, not shaving elsewhere.
-- Stable, data-derived `key`s. Array index is acceptable *only* for the table body rows,
-  which are never reordered or filtered — anywhere else it is a bug.
-- No `await` inside a loop; independent requests go in `Promise.all`.
-- `useMemo`/`useCallback` where they prevent real work (`baseline`, `send`, `dismiss`) —
-  not on primitive comparisons.
+- **The bundle is one ~906 kB chunk (~280 kB gzipped)** — Recharts plus the A2UI
+  renderer. This is the known baseline. If it becomes a problem, the fix is `React.lazy`
+  + `<Suspense>` around the chart views, not shaving elsewhere.
+- Stable, data-derived `key`s. Array index is acceptable *only* for the static table
+  body rows — anywhere else it is a bug.
+- `useMemo`/`useCallback` where they prevent real work (the processor, `send`, `canvas`).
 - Only `.dashboard` and `.chat-log` scroll; `.shell` is `overflow: hidden`. Keep it that
   way or the fixed layout breaks.
 
 ## 8. Gates — honest baseline
 
 ```bash
-npm run lint       # oxlint — configless, currently CLEAN (zero findings)
-npm run build      # vite build — currently passes, ~609 kB / 178 kB gzipped
-npm run dev        # then click through the app
+npm run lint       # oxlint, configured in .oxlintrc.json — currently CLEAN
+npm run build      # vite build — passes; ~906 kB / ~280 kB gzipped, one chunk
+npm run dev        # then actually click through the app
 ```
 
-- **The linter is `oxlint`, not ESLint.** There is no `eslint.config.js` and none is
-  needed — oxlint runs without configuration. `npm run lint` is a real gate and it is
-  currently green: **never leave it with a new finding.**
-- **There is no TypeScript and no `npm run typecheck`.**
-- **There is no test framework.** If adding one: Vitest + React Testing Library + MSW.
-  Priority order — `ComponentRenderer` against malformed payloads (the coercers are the
-  highest-value thing to test), `api.js` network-failure path, `ErrorBoundary` containment,
-  `formatCompact`/`formatFull` edges.
-
-`npm run build` succeeding means it compiled, **not** that it works. Run the app.
+- **The linter is `oxlint`, not ESLint**, configured by `.oxlintrc.json`. `npm run lint`
+  is a real gate and it is currently green: **never leave it with a new finding.**
+- **There is no TypeScript and no test framework.** If adding one: Vitest + React Testing
+  Library. Priority order — the coercers against malformed payloads, `transport.js`
+  frame-splitting across chunk boundaries, `ErrorBoundary` containment, format edges.
+- `npm run build` succeeding means it compiled, **not** that it works. Run the app.
 
 ## 9. AI agent rules
 
-1. **Read `ComponentRenderer.jsx` first** — it defines what can be drawn.
-2. **Keep the catalog in sync with `backend/schemas.py`.** Two edits, always.
-3. **Never trust the payload.** New field reads go through the coercers.
-4. **Never remove an error-handling layer** (§2), and never render a raw error to a user.
-5. **Never hardcode a chart color or bypass `seriesColor()`.**
-6. Never mirror one piece of state into another; derive during render.
-7. No new dependency without asking — the dependency list is deliberately two entries long.
-8. **Run `npm run build` and actually load the app; report real output.** Do not claim a
-   lint, typecheck, or test that does not exist here.
-9. Keep the diff focused. No drive-by refactors, no reformatting untouched files, no
-   commits unless asked.
-10. Plain JSX. Do not introduce `.tsx` files piecemeal — converting the app to TypeScript
-    is a whole-project decision, not a side effect of another change.
+1. **Read `a2ui/catalog.jsx` first** — it defines what can be drawn — then `App.jsx` for
+   the processor wiring and the single-canvas model.
+2. **Keep the three-edit rule:** backend schema + `_VIEW` row + catalog component, always
+   in step.
+3. **Never trust the payload.** New field reads go through the coercers; new catalog
+   props are `.optional()`.
+4. **Never remove an error-handling layer** (§2), never render a raw error, never move
+   the boundary off the card.
+5. **Never bypass the protocol:** canvas clears go through `processor.processMessages`,
+   not React state surgery.
+6. **Never hardcode a chart color or bypass `seriesColor()`.**
+7. No new dependency without asking, and never bump `zod` past v3 (§0).
+8. New animation follows §6 (transform/opacity, <300ms, reduced-motion fallback).
+9. **Run `npm run lint` and `npm run build`, load the app, and report real output.** Do
+   not claim a typecheck or tests that do not exist here.
+10. Plain JSX; converting to TypeScript is a whole-project decision, not a side effect.
+    Keep the diff focused; no commits unless asked.
 
 ## 10. Review checklist
 
-**Renderer** — whitelist dispatch intact (`hasOwnProperty`, not a bare index)? new field
-reads coerced? renderer returns `<EmptyState/>` instead of throwing on empty? new type
-registered in both `RENDERERS` and, if wide, `WIDE_TYPES`?
+**Contract** — new component in the catalog with Zod props `.optional()`? backend
+`_VIEW` + schema edited together? boundary still inside `Card`? canvas still cleared via
+`deleteSurface` before a turn? busy guard intact on the action handler?
 
-**Errors** — every card still inside an `<ErrorBoundary>`? `api.js` still resolving rather
-than throwing? any raw error message, stack, or backend exception text rendered to the
-user? empty `catch`? loading/empty/error all present?
+**Errors** — every card still inside the boundary? `transport.js` still resolving (never
+rejecting)? any raw error text rendered? loading/empty/error all distinct?
 
-**State** — server payload mirrored into a second state? `useEffect` computing what render
-could? stale-response guard present on the fetch? identifier named `data`/`tmp`/`item`?
+**State** — processor data mirrored into React state? `useEffect` computing what render
+could? stale-response guard present? processor rebuilt accidentally (deps on the
+`useMemo`)?
 
-**Charts** — hardcoded hex instead of `seriesColor()`? more than 4 series or 6 slices?
-dual axis? legend missing with ≥ 2 series? limits still matching the backend's?
+**Charts** — hardcoded hex? more than 4 series / 6 slices? dual axis? legend missing
+with ≥ 2 series? gradient fill on a multi-series chart? `useId` missing on a new
+gradient?
 
 **Components** — component defined inside a component? file over 250 lines? `&&` with a
 numeric left side? array index as `key` outside the static table body?
 
-**A11y** — icon-only button without a name? input without a label? status by color alone?
-focus outline removed?
+**A11y & motion** — icon button without a name? status by color alone? focus ring
+removed? animation without a reduced-motion fallback, or animating layout properties?
 
-**Gates** — `npm run build` actually run and reported? no claim of lint/typecheck/tests,
-which do not exist in this project?
+**Gates** — lint and build actually run and reported? no claim of tests, which do not
+exist in this package?

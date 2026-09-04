@@ -1,0 +1,36 @@
+# Tooling home for the backend. Dependencies stay mirrored in requirements.txt
+# because the Dockerfile COPYs that file alone for layer caching -- change both
+# together.
+
+[project]
+name = "genui-backend"
+version = "2.0.0"
+description = "Generative UI backend speaking A2UI v0.9 — FastAPI + OpenAI structured outputs"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "openai>=1.59,<2",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[tool.pytest.ini_options]
+# The backend is a flat package-less module layout on purpose (see README,
+# "Backend layout"); pythonpath makes `import a2ui` work from any CWD.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RET", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Bare asserts are the point of pytest.
+"tests/*" = ["S101"]
