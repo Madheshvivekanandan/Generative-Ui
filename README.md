@@ -59,10 +59,10 @@ There are two schemas in this project and it is worth being clear about why.
 
 | | Where | What it is |
 |---|---|---|
-| **Block catalog** | `backend/schemas.py` | Pydantic models that constrain what the LLM may emit |
+| **Block catalog** | `backend/schemas/` | Pydantic models that constrain what the LLM may emit (one per file) |
 | **A2UI catalog** | `frontend/src/a2ui/catalog.jsx` | Zod-described components the renderer will draw |
 
-The agent plans in typed *blocks*; `backend/a2ui.py` compiles those blocks into
+The agent plans in typed *blocks*; `backend/a2ui/compiler.py` compiles those blocks into
 A2UI messages. The wire format and the client are genuine A2UI — only the
 agent's internal planning step is typed.
 
@@ -93,10 +93,14 @@ published on `:8000` for `curl` and `/docs`.
 Without a key the stack still comes up and the baseline dashboard renders; only
 generation returns its missing-key fallback.
 
-> `proxy_buffering off` in `frontend/nginx.conf` is load-bearing. With buffering
-> on, nginx holds every SSE frame until the turn ends, the progressive render
-> disappears, and everything still *works* — which is what makes it easy to
-> break without noticing.
+> **Two independent things keep the stream unbuffered, on purpose.** The backend
+> sends `X-Accel-Buffering: no` (`backend/api/streams.py`) and
+> `frontend/nginx.conf` sets `proxy_buffering off`. nginx honours the header
+> even when buffering is on, so either one alone is enough — verified by running
+> the stack with the header in place and `proxy_buffering` left at its default,
+> where frames still arrive progressively. Keep both anyway: whichever you
+> delete, the failure mode is that everything still *works* while the
+> progressive render quietly disappears.
 
 ## Running it locally, without Docker
 
@@ -142,7 +146,7 @@ error branch that can leave it with nothing to draw.
 
 ## The block catalog
 
-Defined in `backend/schemas.py`. A turn returns **one to four** blocks, laid out
+Defined in `backend/schemas/`. A turn returns **one to four** blocks, laid out
 top to bottom, so "how did Q3 go" can answer with a KPI row above a chart.
 
 | type | when the model picks it | props |
