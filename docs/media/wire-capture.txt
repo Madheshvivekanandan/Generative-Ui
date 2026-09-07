@@ -1,0 +1,25 @@
+Real SSE frames from POST /api/generate, captured with curl -N.
+Request: {"session_id":"demo","message":"Show monthly revenue as a line chart"}
+
+
+ event: open
+ data: {"surface_id": "dashboard"}
+ 
+ event: a2ui
+ data: {"version": "v0.9", "createSurface": {"surfaceId": "dashboard", "catalogId": "https://acme.analytics/catalogs/finance/v1.json"}}
+ 
+ event: a2ui
+ data: {"version": "v0.9", "updateDataModel": {"surfaceId": "dashboard", "path": "/", "value": {"blocks": []}}}
+ 
+ event: a2ui
+ data: {"version": "v0.9", "updateDataModel": {"surfaceId": "dashboard", "path": "/", "value": {"blocks": [{"title": "Monthly Revenue", "x_label": "Month", "y_label": "Revenue (USD)", "unit": "USD", "series": [{"name": "Revenue", "points": [{"x": "2025-09", "y": 412000.0}, {"x": "2025-10", "y": 438000.0}, {"x": "2025-11", "y": 401000.0}, {"x": "2025-12", "y": 496000.0}, {"x": "2026-01", "y": 455000.0}, {"x": "2026-02", "y": 471000.0}, {"x": "2026-03", "y": 523000.0}, {"x": "2026-04", "y": 508000.0}, {"x": "2026-05", "y": 561000.0}, {"x": "2026-06", "y": 594000.0}, {"x": "2026-07", "y": 572000.0}, {"x": "2026-08", "y": 631000.0}]}]}]}}}
+ 
+ event: a2ui
+ data: {"version": "v0.9", "updateComponents": {"surfaceId": "dashboard", "components": [{"id": "b0", "component": "Card", "child": "b0_body"}, {"id": "b0_view", "component": "LineChart", "series": {"path": "/blocks/0/series"}, "unit": {"path": "/blocks/0/unit"}, "x_label": {"path": "/blocks/0/x_label"}, "y_label": {"path": "/blocks/0/y_label"}}, {"id": "b0_a0", "component": "Button", "child": "b0_a0_label", "variant": "default", "action": {"event": {"name": "refine", "context": {"prompt": "Show monthly revenue as a table", "label": "Show as a table"}}}}, {"id": "b0_a0_label", "component": "Text", "text": "Show as a table"}, {"id": "b0_a1", "component": "Button", "child": "b0_a1_label", "variant": "default", "action": {"event": {"name": "refine", "context": {"prompt": "Compare monthly revenue to expenses", "label": "Compare to expenses"}}}}, {"id": "b0_a1_label", "component": "Text", "text": "Compare to expenses"}, {"id": "b0_actions", "component": "Row", "children": ["b0_a0", "b0_a1"], "justify": "start"}, {"id": "b0_title", "component": "Text", "text": {"path": "/blocks/0/title"}, "variant": "h4"}, {"id": "b0_body", "component": "Column", "children": ["b0_title", "b0_view", "b0_actions"]}, {"id": "root", "component": "Column", "children": ["b0"]}]}}
+ 
+ event: meta
+ data: {"ok": true, "explanation": "Rendered a line chart to display monthly revenue over time.", "follow_ups": ["Show monthly expenses as a line chart", "Display revenue by product line", "Compare revenue by region"], "fallback": false, "error": null, "rendered": ["Monthly Revenue (line_chart)"]}
+ 
+ event: done
+ data: {}
+ 
